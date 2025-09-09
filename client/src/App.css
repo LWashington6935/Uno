@@ -1,0 +1,204 @@
+/* ===== Reset & Base ===== */
+body {
+  margin: 0;
+  font-family: 'Segoe UI', sans-serif;
+  background: #b00000;
+  color: #fff;
+}
+
+.container {
+  position: relative;    /* for overlays */
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  min-height: 100vh;
+  padding: 1rem;
+}
+
+/* ===== Game Area ===== */
+.game-area {
+  position: relative;
+  width: 90vw;
+  height: 90vh;
+  max-width: 1000px;
+  border-radius: 50%;
+  background: radial-gradient(#a30000, #660000);
+  box-shadow: 0 0 30px #000;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+
+/* ===== Player Zones ===== */
+.player-zone {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.player-hand {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 5px;
+}
+
+.player-top    { top: 5%;    left: 50%; transform: translateX(-50%); }
+.player-right  { top: 50%;   right: 5%; transform: translateY(-50%); }
+.player-bottom { bottom: 5%; left: 50%; transform: translateX(-50%); }
+.player-left   { top: 50%;   left: 5%;  transform: translateY(-50%); }
+
+/* ===== Cards ===== */
+.card-img {
+  width: 70px;
+  height: auto;
+  cursor: pointer;
+  border-radius: 6px;
+  transition: transform 0.2s;
+}
+.card-img:hover { transform: scale(1.1); }
+.card-img.disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* ===== Buttons ===== */
+.button {
+  margin-top: 1rem;
+  background: #f1c40f;
+  color: #000;
+  padding: 10px 20px;
+  border-radius: 10px;
+  border: none;
+  cursor: pointer;
+  font-weight: bold;
+}
+
+/* ===== Draw & Discard Piles ===== */
+.piles {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  width: 40%;
+  max-width: 300px;
+}
+
+.draw-pile,
+.top-card-pile {
+  width: 70px;
+  height: 100px;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+
+.draw-pile {
+  cursor: pointer;
+}
+.draw-pile.disabled {
+  opacity: 0.4;
+  pointer-events: none;
+}
+
+/* ===== Color-Picker Modal ===== */
+.color-picker {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  background: rgba(0,0,0,0.85);
+  padding: 1rem 1.5rem;
+  border-radius: 8px;
+  display: flex;
+  gap: 1rem;
+  flex-wrap: wrap;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.color-picker h3 {
+  width: 100%;
+  margin: 0 0 0.5rem;
+  text-align: center;
+  color: #fff;
+  font-size: 1.1rem;
+}
+
+.color-picker button {
+  flex: 1;
+  padding: 0.5rem 1rem;
+  border: none;
+  border-radius: 6px;
+  font-weight: bold;
+  cursor: pointer;
+  color: #000;
+}
+.color-picker button:hover {
+  filter: brightness(1.1);
+}
+.color-picker button:focus {
+  outline: 2px solid #fff;
+}
+
+/* ===== Active Player Glow ===== */
+@keyframes glow {
+  from { box-shadow: 0 0 8px rgba(255, 255, 0, 0.7); }
+  to   { box-shadow: 0 0 20px rgba(255, 255, 0, 1); }
+}
+.player-zone.current-turn {
+  animation: glow 1s ease-in-out infinite alternate;
+}
+
+/* ===== UNO Button ===== */
+.uno-button {
+  position: absolute;
+  bottom: 12px;
+  right: 12px;
+  background: #ff4136; /* UNO red */
+  color: #fff;
+  font-weight: bold;
+  font-size: 1rem;
+  padding: 10px 18px;
+  border: none;
+  border-radius: 50px;
+  cursor: pointer;
+  box-shadow: 0 0 10px rgba(0,0,0,0.5);
+  transition: transform 0.2s, background 0.2s;
+}
+
+.uno-button:hover:enabled {
+  background: #ff1a1a;
+  transform: scale(1.1);
+}
+
+.uno-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ===== UNO Toast ===== */
+.toast-uno {
+  position: absolute;
+  top: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: #ffeb3b;
+  color: #000;
+  padding: 12px 24px;
+  border-radius: 8px;
+  font-weight: bold;
+  font-size: 1.3rem;
+  box-shadow: 0 0 15px rgba(0,0,0,0.6);
+  animation: fade-slide 1.2s ease-in-out;
+  z-index: 2000;
+}
+
+@keyframes fade-slide {
+  from { opacity: 0; transform: translate(-50%, -20px); }
+  to   { opacity: 1; transform: translate(-50%, 0); }
+}
