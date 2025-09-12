@@ -1,3 +1,4 @@
+[![Watch the demo](https://img.youtube.com/vi/1pM6mVItgAc/hqdefault.jpg)](https://youtu.be/1pM6mVItgAc "Play video on YouTube")
 # UNO-Style Realtime Game (React + Socket.IO)
 
 A fast, multiplayer, UNO-style card game you can run locally or deploy. This README explains **what it does**, **how it works**, **the rules we implemented**, and **how to run, extend, and deploy it**. It also documents the **Socket.IO events** and several implementation details that typically trip people up (e.g., Uno declarations, draw-and-play, reverse logic, and removing wilds/draw4 from hands correctly).
