@@ -9,26 +9,9 @@ const socket = io("http://localhost:3001", {
   reconnectionAttempts: 5,
 });
 
-// Helper: remove exactly ONE played card from a hand.
-// - For wild/draw4, match by value only (ignore chosen color on the played card).
-// - For normal cards, match by color + value.
-function removeOneCard(hand = [], played) {
-  let removed = false;
-  return hand.filter((c) => {
-    if (removed) return true;
-    if (played.value === "wild" || played.value === "draw4") {
-      if (c.value === played.value) {
-        removed = true;
-        return false;
-      }
-    } else {
-      if (c.color === played.color && c.value === played.value) {
-        removed = true;
-        return false;
-      }
-    }
-    return true;
-  });
+// Remove EXACTLY the card by its unique id (server should include `id` per card)
+function removeById(hand = [], played) {
+  return hand.filter((c) => c.id !== played.id);
 }
 
 function App() {
@@ -48,21 +31,19 @@ function App() {
   const [colorMessage, setColorMessage] = useState("");
 
   // UNO UI/flow
-  const [unoPendingFor, setUnoPendingFor] = useState(null); // socket id who must press UNO now
-  const [unoBanner, setUnoBanner] = useState(null);         // { text, ok, playerId }
-  const [unoPressed, setUnoPressed] = useState(false);       // tactile feel
+  const [unoPendingFor, setUnoPendingFor] = useState(null);
+  const [unoBanner, setUnoBanner] = useState(null);  // { text, ok, playerId }
+  const [unoPressed, setUnoPressed] = useState(false);
 
   // Winner popup
-  const [winner, setWinner] = useState(null);                // { playerId, name }
+  const [winner, setWinner] = useState(null);        // { playerId, name }
 
   // ---------- Socket wiring ----------
   useEffect(() => {
-    // Connect / lobby
     socket.on("connect", () => setConnected(true));
     socket.on("update-players", setPlayers);
     socket.on("invalid-play", ({ message }) => alert(message));
 
-    // Game start
     socket.on("game-started", ({ hands, topCard: initialTop, currentPlayerId }) => {
       setGameStarted(true);
       setHand(hands[socket.id] || []);
@@ -76,89 +57,66 @@ function App() {
       setWinner(null);
     });
 
-    // Someone played a card
     socket.on("card-played", ({ card, playerId, nextPlayerId, topCard }) => {
       setTopCard(topCard);
       setCurrentPlayerId(nextPlayerId ?? null);
 
-        // For wild/draw4 after choosing a color
-  const handleWildColor = (color) => {
-    // If your hand has 2 (wild/draw4 + 1), this play leaves you with 1 card:
-    const willLeaveOne = hand.length === 2;
-    const unoDeclared = willLeaveOne && Date.now() <= unoPreArmedUntil;
+      if (card.value === "wild") {
+        setColorMessage(`Color selected: ${card.color.toUpperCase()}`);
+      } else if (card.value === "draw4") {
+        setColorMessage(
+          `Color selected: ${card.color.toUpperCase()}. Next player draws 4 and is skipped!`
+        );
+      } else {
+        setColorMessage("");
+      }
 
-    const played = { ...pendingWildCard, color };
-    setColorMessage(
-      `Color selected: ${color.toUpperCase()}` +
-        (pendingWildCard.value === "draw4"
-          ? ". Next player draws 4 and is skipped!"
-          : "")
-    );
-    socket.emit("play-card", { card: played, unoDeclared });
-    setPendingWildCard(null);
-  };
-
-      // Update counts for *all* hands (remove exactly ONE matching card)
-      setAllHands(prev => {
+      setAllHands((prev) => {
         const updated = { ...prev };
-        if (updated[playerId]) {
-          updated[playerId] = removeOneCard(updated[playerId], card);
-        }
+        if (updated[playerId]) updated[playerId] = removeById(updated[playerId], card);
         return updated;
       });
 
-      // Update *my* hand removal (remove exactly ONE)
       if (playerId === socket.id) {
-        setHand(prev => removeOneCard(prev, card));
+        setHand((prev) => removeById(prev, card));
       }
 
       setPendingWildCard(null);
     });
 
-    // I drew a card
     socket.on("card-drawn", (card) => {
-      setHand(prev => [...prev, card]);
-      setAllHands(prev => ({
+      setHand((prev) => [...prev, card]);
+      setAllHands((prev) => ({
         ...prev,
         [socket.id]: [...(prev[socket.id] || []), card],
       }));
     });
 
-    // Turn moved (e.g., after draw with no play)
     socket.on("turn-changed", (id) => {
       setCurrentPlayerId(id ?? null);
       setColorMessage("");
       setPendingWildCard(null);
     });
 
-    // --- UNO flow ---
-    socket.on("uno-window", ({ playerId }) => {
-      // Server says this player must declare UNO now (until next player acts).
-      setUnoPendingFor(playerId);
-    });
-
+    // UNO flow
+    socket.on("uno-window", ({ playerId }) => setUnoPendingFor(playerId));
     socket.on("uno-result", ({ playerId, ok, penalty }) => {
-      // Banner for 3 seconds
-      const p = players.find(x => x.id === playerId);
+      const p = players.find((x) => x.id === playerId);
       const who = p ? p.name : "Player";
-      if (ok) {
-        setUnoBanner({ text: `${who} called UNO!`, ok: true, playerId });
-      } else {
-        setUnoBanner({ text: `${who} missed UNO! +${penalty}`, ok: false, playerId });
-      }
-      // Clear pending if it was this player
-      setUnoPendingFor(prev => (prev === playerId ? null : prev));
+      setUnoBanner({
+        text: ok ? `${who} called UNO!` : `${who} missed UNO! +${penalty}`,
+        ok,
+        playerId,
+      });
+      setUnoPendingFor((prev) => (prev === playerId ? null : prev));
       setTimeout(() => setUnoBanner(null), 3000);
     });
 
-    // Winner popup
     socket.on("game-won", ({ playerId, name }) => {
       setWinner({ playerId, name });
-      // Clear any pending UNO UI; game is over
       setUnoPendingFor(null);
     });
 
-    // Optional: keep mirror of server hands if it emits
     socket.on("update-hands", (hands) => {
       setAllHands(hands);
       setHand(hands[socket.id] || []);
@@ -189,10 +147,7 @@ function App() {
 
   const hasPlayableCard = () =>
     hand.some(
-      (c) =>
-        c.color === topCard?.color ||
-        c.value === topCard?.value ||
-        c.value === "wild"
+      (c) => c.color === topCard?.color || c.value === topCard?.value || c.value === "wild"
     );
 
   const handleDrawCard = () => {
@@ -204,8 +159,9 @@ function App() {
     socket.emit("draw-card");
   };
 
+  // Back-of-card *horizontal* fan (top/bottom seats)
   const renderBackFan = (count, position) => {
-    const offset = position === "player-top" ? 180 : 0;
+    const offset = position === "player-top" ? 180 : 0; // upside down for top
     const spread = 20;
     return Array(count)
       .fill()
@@ -223,6 +179,29 @@ function App() {
       });
   };
 
+  // Back-of-card column for side seats, but EACH CARD is rotated to horizontal.
+  // Left: +90deg (card face points to the right); Right: -90deg (card face points to the left).
+  const renderSideBackColumn = (count, side /* "player-left" | "player-right" */) => {
+    const rotateDeg = side === "player-left" ? 90 : -90;
+    return Array(count)
+      .fill()
+      .map((_, i) => (
+        <img
+          key={i}
+          src="/cards/back.jpg"
+          alt="back"
+          className="card-img disabled"
+          style={{
+            margin: "-28px 0",
+            transform: `rotate(${rotateDeg}deg)`,
+            // optional: slightly narrow the visual footprint when rotated
+            width: 70,
+          }}
+        />
+      ));
+  };
+
+  // Your own hand (bottom) in a horizontal fan
   const renderHandFan = () => {
     const count = hand.length;
     const spread = 40;
@@ -231,7 +210,7 @@ function App() {
       const fname = `${card.color}_${card.value}`.toLowerCase();
       return (
         <img
-          key={i}
+          key={card.id ?? i}
           src={`/cards/${fname}.jpg`}
           alt="card"
           className="card-img"
@@ -239,10 +218,9 @@ function App() {
           onClick={() => {
             if (currentPlayerId !== socket.id) return;
             if (card.value === "wild" || card.value === "draw4") {
-              setPendingWildCard(card);
+              setPendingWildCard(card); // preserve exact card with id
             } else {
-              // No UNO flag here; server will open a UNO window if this leaves us at 1
-              socket.emit("play-card", { card });
+              socket.emit("play-card", { card }); // send exact card object
             }
           }}
         />
@@ -250,6 +228,7 @@ function App() {
     });
   };
 
+  // Wild/draw4 color choose (uses exact card object with id)
   const handleWildColor = (color) => {
     setColorMessage(
       `Color selected: ${color.toUpperCase()}` +
@@ -258,11 +237,11 @@ function App() {
           : "")
     );
     const played = { ...pendingWildCard, color };
-    // No unoDeclared flag here; press the UNO button after the play if needed
     socket.emit("play-card", { card: played });
     setPendingWildCard(null);
   };
 
+  // POV layout: me at bottom; others clockwise to top/right/left
   const positions = ["player-bottom", "player-top", "player-right", "player-left"];
   const orderedPlayers = useMemo(() => {
     const idx = players.findIndex((p) => p.id === socket.id);
@@ -271,7 +250,6 @@ function App() {
   }, [players]);
 
   const myUnoActive = unoPendingFor === socket.id && hand.length === 1;
-  const myTurn = currentPlayerId === socket.id;
 
   return (
     <div className="container">
@@ -346,9 +324,7 @@ function App() {
           {/* Winner popup */}
           {winner && (
             <div className="win-overlay">
-              <div className="win-box">
-                {winner.name} wins the game!
-              </div>
+              <div className="win-box">{winner.name} wins the game!</div>
             </div>
           )}
 
@@ -378,11 +354,25 @@ function App() {
             const count = allHands[player.id]?.length || 0;
             const isSelf = player.id === socket.id;
             const isTurn = player.id === currentPlayerId;
+
+            // When more than 2 players, sides (left/right) keep vertical layout,
+            // but cards are rotated to be horizontally readable.
+            const isSide = pos === "player-right" || pos === "player-left";
+            const useSideColumn = players.length > 2 && isSide;
+            const handStyle = useSideColumn
+              ? { flexDirection: "column", alignItems: "center" }
+              : undefined;
+
             return (
               <div className={`player-zone ${pos} ${isTurn ? "current-turn" : ""}`} key={player.id}>
                 <div>{player.name}</div>
-                <div className="player-hand">
-                  {isSelf ? renderHandFan() : renderBackFan(count, pos)}
+                <div className="player-hand" style={handStyle}>
+                  {isSelf
+                    ? renderHandFan() // bottom: your cards
+                    : useSideColumn
+                    ? renderSideBackColumn(count, pos) // sides: vertical stack, each card rotated to horizontal
+                    : renderBackFan(count, pos) // top: horizontal fan, rotated 180°
+                  }
                 </div>
               </div>
             );
@@ -407,7 +397,7 @@ function App() {
           <div style={{ position: "absolute", bottom: 12, right: 12 }}>
             <button
               className="uno-btn"
-              disabled={!myUnoActive}
+              disabled={!(unoPendingFor === socket.id && hand.length === 1)}
               onMouseDown={() => setUnoPressed(true)}
               onMouseUp={() => setUnoPressed(false)}
               onMouseLeave={() => setUnoPressed(false)}

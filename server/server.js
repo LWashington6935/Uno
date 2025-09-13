@@ -14,18 +14,20 @@ const io = new Server(server, {
 
 // -------- Game State --------
 let players = [];          // [{ id, name }]
-let deck = [];             // array of { color, value }
+let deck = [];             // array of { id, color, value }
 let handsById = {};        // { socketId: [cards] }
 let topCard = null;        // current top of discard pile
 let currentTurnIndex = 0;  // index into players[]
 let direction = 1;         // +1 forward, -1 reverse
 let gameOver = false;
 let unoPendingFor = null;  // socket id of player who must call UNO
+let nextCardId = 1;        // NEW: unique id generator
 
 const mod = (n, m) => ((n % m) + m) % m;
 
 // -------- Helpers --------
 function isPlayable(card, top) {
+  // wild/draw4 always playable (client sets chosen color for wilds)
   return (
     card.color === top.color ||
     card.value === top.value ||
@@ -51,14 +53,12 @@ function checkWin(playerId) {
   if ((handsById[playerId] || []).length === 0) {
     const winner = players.find((p) => p.id === playerId);
     gameOver = true;
-    // Clear any stray UNO state and announce winner
-    unoPendingFor = null;
+    unoPendingFor = null; // clear any stray UNO state
     io.emit("game-won", { playerId, name: winner?.name || "Player" });
     return true;
   }
   return false;
 }
-
 // Penalize any unresolved UNO *before any new action by anyone*.
 function settlePendingUnoBeforeAction() {
   if (!unoPendingFor) return;
@@ -133,31 +133,24 @@ io.on("connection", (socket) => {
       return socket.emit("invalid-play", { message: "Invalid card play." });
     }
 
-    // Remove from hand & place on top
-    function sameCard(a, b) {
-  if (b.value === "wild" || b.value === "draw4") {
-    return a.value === b.value;           // ignore color for wilds
-  }
-  return a.color === b.color && a.value === b.value;
-}
+    // ---- Remove EXACTLY the played card by unique id ----
+    handsById[me] = (handsById[me] || []).filter(c => c.id !== card.id);
 
-handsById[me] = (handsById[me] || []).filter(c => !sameCard(c, card));
-
-    topCard = card;
+    // Place on top (carry the same id; for wilds the client already set chosen color)
+    topCard = { ...card };
 
     // --- Win / UNO flow (must run before advancing the turn) ---
     const remaining = (handsById[me]?.length ?? 0);
 
     // 1) Win takes precedence
     if (remaining === 0) {
-      // Announce and stop further processing
       const winner = players.find((p) => p.id === me);
       gameOver = true;
-      unoPendingFor = null; // ensure no lingering UNO state
+      unoPendingFor = null;
       io.emit("game-won", { playerId: me, name: winner?.name || "Player" });
 
       io.emit("update-hands", handsById);
-      io.emit("card-played", { card, playerId: me, nextPlayerId: null, topCard });
+      io.emit("card-played", { card: topCard, playerId: me, nextPlayerId: null, topCard });
       return;
     }
 
@@ -177,7 +170,7 @@ handsById[me] = (handsById[me] || []).filter(c => !sameCard(c, card));
     }
 
     // Resolve action cards & advance turn
-    switch (card.value) {
+    switch (topCard.value) {
       case "skip":
         advanceTurn(2);
         break;
@@ -214,7 +207,7 @@ handsById[me] = (handsById[me] || []).filter(c => !sameCard(c, card));
     }
 
     io.emit("card-played", {
-      card,
+      card: topCard,
       playerId: me,
       nextPlayerId: players[currentTurnIndex]?.id || null,
       topCard,
@@ -275,19 +268,21 @@ handsById[me] = (handsById[me] || []).filter(c => !sameCard(c, card));
 server.listen(3001, () => console.log("🚀 Server running on port 3001"));
 
 // -------- Deck helpers --------
+const makeCard = (color, value) => ({ id: nextCardId++, color, value }); // NEW
+
 function createDeck() {
   const colors = ["red", "green", "blue", "yellow"];
   const values = ["0","1","2","3","4","5","6","7","8","9","skip","reverse","draw2"];
   const out = [];
   colors.forEach((color) => {
     values.forEach((value) => {
-      out.push({ color, value });
-      if (value !== "0") out.push({ color, value });
+      out.push(makeCard(color, value));
+      if (value !== "0") out.push(makeCard(color, value));
     });
   });
   for (let i = 0; i < 4; i++) {
-    out.push({ color: "wild", value: "wild" });
-    out.push({ color: "wild", value: "draw4" });
+    out.push(makeCard("wild", "wild"));
+    out.push(makeCard("wild", "draw4"));
   }
   return out;
 }
