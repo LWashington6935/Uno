@@ -9,9 +9,22 @@ const socket = io("http://localhost:3001", {
   reconnectionAttempts: 5,
 });
 
-// Remove EXACTLY the card by its unique id (server should include `id` per card)
-function removeById(hand = [], played) {
-  return hand.filter((c) => c.id !== played.id);
+// Remove exactly ONE instance of a played card from a hand.
+// For wild/draw4 we match by value only (ignore chosen color on the played card).
+function removeOneCard(hand = [], played) {
+  let removed = false;
+  return hand.filter((c) => {
+    if (removed) return true;
+    const isWildish = played.value === "wild" || played.value === "draw4";
+    const match = isWildish
+      ? c.value === played.value
+      : c.color === played.color && c.value === played.value;
+    if (match) {
+      removed = true;
+      return false;
+    }
+    return true;
+  });
 }
 
 function App() {
@@ -30,13 +43,16 @@ function App() {
   const [pendingWildCard, setPendingWildCard] = useState(null);
   const [colorMessage, setColorMessage] = useState("");
 
-  // UNO UI/flow
-  const [unoPendingFor, setUnoPendingFor] = useState(null);
-  const [unoBanner, setUnoBanner] = useState(null);  // { text, ok, playerId }
+  // UNO flow UI
+  const [unoPendingFor, setUnoPendingFor] = useState(null); // socket id who must press UNO now
+  const [unoBanner, setUnoBanner] = useState(null);         // { text, ok, playerId }
   const [unoPressed, setUnoPressed] = useState(false);
 
-  // Winner popup
-  const [winner, setWinner] = useState(null);        // { playerId, name }
+  // Scoreboard / round summary / tournament winner
+  const [scores, setScores] = useState({});
+  const [targetScore, setTargetScore] = useState(500);
+  const [roundSummary, setRoundSummary] = useState(null);   // { winnerId, breakdown[], eliminatedIds[] }
+  const [winner, setWinner] = useState(null);               // { playerId, name }
 
   // ---------- Socket wiring ----------
   useEffect(() => {
@@ -44,17 +60,20 @@ function App() {
     socket.on("update-players", setPlayers);
     socket.on("invalid-play", ({ message }) => alert(message));
 
-    socket.on("game-started", ({ hands, topCard: initialTop, currentPlayerId }) => {
+    socket.on("game-started", ({ hands, topCard: initialTop, currentPlayerId, scores: sc, targetScore: ts }) => {
       setGameStarted(true);
       setHand(hands[socket.id] || []);
       setAllHands(hands);
       setTopCard(initialTop);
-      setCurrentPlayerId(currentPlayerId);
+      setCurrentPlayerId(currentPlayerId ?? null);
       setColorMessage("");
       setPendingWildCard(null);
       setUnoPendingFor(null);
       setUnoBanner(null);
       setWinner(null);
+      setRoundSummary(null);
+      setScores(sc || {});
+      setTargetScore(ts || 500);
     });
 
     socket.on("card-played", ({ card, playerId, nextPlayerId, topCard }) => {
@@ -62,31 +81,31 @@ function App() {
       setCurrentPlayerId(nextPlayerId ?? null);
 
       if (card.value === "wild") {
-        setColorMessage(`Color selected: ${card.color.toUpperCase()}`);
+        setColorMessage(`Color selected: ${card.color?.toUpperCase?.() || ""}`);
       } else if (card.value === "draw4") {
         setColorMessage(
-          `Color selected: ${card.color.toUpperCase()}. Next player draws 4 and is skipped!`
+          `Color selected: ${card.color?.toUpperCase?.() || ""}. Next player draws 4 and is skipped!`
         );
       } else {
         setColorMessage("");
       }
 
-      setAllHands((prev) => {
+      // Update counts for *all* hands (remove exactly ONE matching card)
+      setAllHands(prev => {
         const updated = { ...prev };
-        if (updated[playerId]) updated[playerId] = removeById(updated[playerId], card);
+        if (updated[playerId]) updated[playerId] = removeOneCard(updated[playerId], card);
         return updated;
       });
 
-      if (playerId === socket.id) {
-        setHand((prev) => removeById(prev, card));
-      }
+      // Update *my* hand removal (remove exactly ONE)
+      if (playerId === socket.id) setHand(prev => removeOneCard(prev, card));
 
       setPendingWildCard(null);
     });
 
     socket.on("card-drawn", (card) => {
-      setHand((prev) => [...prev, card]);
-      setAllHands((prev) => ({
+      setHand(prev => [...prev, card]);
+      setAllHands(prev => ({
         ...prev,
         [socket.id]: [...(prev[socket.id] || []), card],
       }));
@@ -98,25 +117,42 @@ function App() {
       setPendingWildCard(null);
     });
 
-    // UNO flow
-    socket.on("uno-window", ({ playerId }) => setUnoPendingFor(playerId));
+    // --- UNO flow ---
+    socket.on("uno-window", ({ playerId }) => {
+      setUnoPendingFor(playerId);
+    });
+
     socket.on("uno-result", ({ playerId, ok, penalty }) => {
-      const p = players.find((x) => x.id === playerId);
+      const p = players.find(x => x.id === playerId);
       const who = p ? p.name : "Player";
       setUnoBanner({
         text: ok ? `${who} called UNO!` : `${who} missed UNO! +${penalty}`,
         ok,
         playerId,
       });
-      setUnoPendingFor((prev) => (prev === playerId ? null : prev));
+      setUnoPendingFor(prev => (prev === playerId ? null : prev));
       setTimeout(() => setUnoBanner(null), 3000);
     });
 
-    socket.on("game-won", ({ playerId, name }) => {
-      setWinner({ playerId, name });
+    // Round summary + scores
+    socket.on("round-ended", ({ winnerId, scores: sc, breakdown, eliminatedIds, targetScore: ts }) => {
+      setScores(sc || {});
+      setTargetScore(ts || 500);
+      setRoundSummary({ winnerId, breakdown, eliminatedIds });
+    });
+
+    // Tournament winner
+    socket.on("tournament-won", ({ championId, championName, scores: sc }) => {
+      setScores(sc || {});
+      setWinner({ playerId: championId, name: championName || "Winner" });
       setUnoPendingFor(null);
     });
 
+    // Optional live score updates / hand mirrors
+    socket.on("scores-updated", ({ scores: sc, targetScore: ts }) => {
+      if (sc) setScores(sc);
+      if (ts) setTargetScore(ts);
+    });
     socket.on("update-hands", (hands) => {
       setAllHands(hands);
       setHand(hands[socket.id] || []);
@@ -132,7 +168,9 @@ function App() {
       socket.off("turn-changed");
       socket.off("uno-window");
       socket.off("uno-result");
-      socket.off("game-won");
+      socket.off("round-ended");
+      socket.off("tournament-won");
+      socket.off("scores-updated");
       socket.off("update-hands");
     };
   }, [players]);
@@ -147,7 +185,10 @@ function App() {
 
   const hasPlayableCard = () =>
     hand.some(
-      (c) => c.color === topCard?.color || c.value === topCard?.value || c.value === "wild"
+      (c) =>
+        c.color === topCard?.color ||
+        c.value === topCard?.value ||
+        c.value === "wild"
     );
 
   const handleDrawCard = () => {
@@ -159,9 +200,7 @@ function App() {
     socket.emit("draw-card");
   };
 
-  // Back-of-card *horizontal* fan (top/bottom seats)
-  const renderBackFan = (count, position) => {
-    const offset = position === "player-top" ? 180 : 0; // upside down for top
+  const renderBackFan = (count) => {
     const spread = 20;
     return Array(count)
       .fill()
@@ -173,35 +212,15 @@ function App() {
             src="/cards/back.jpg"
             alt="back"
             className="card-img disabled"
-            style={{ transform: `rotate(${angle + offset}deg)`, margin: "-20px" }}
+            style={{
+              transform: `rotate(${angle}deg)`,
+              margin: "-20px",
+            }}
           />
         );
       });
   };
 
-  // Back-of-card column for side seats, but EACH CARD is rotated to horizontal.
-  // Left: +90deg (card face points to the right); Right: -90deg (card face points to the left).
-  const renderSideBackColumn = (count, side /* "player-left" | "player-right" */) => {
-    const rotateDeg = side === "player-left" ? 90 : -90;
-    return Array(count)
-      .fill()
-      .map((_, i) => (
-        <img
-          key={i}
-          src="/cards/back.jpg"
-          alt="back"
-          className="card-img disabled"
-          style={{
-            margin: "-28px 0",
-            transform: `rotate(${rotateDeg}deg)`,
-            // optional: slightly narrow the visual footprint when rotated
-            width: 70,
-          }}
-        />
-      ));
-  };
-
-  // Your own hand (bottom) in a horizontal fan
   const renderHandFan = () => {
     const count = hand.length;
     const spread = 40;
@@ -210,7 +229,7 @@ function App() {
       const fname = `${card.color}_${card.value}`.toLowerCase();
       return (
         <img
-          key={card.id ?? i}
+          key={i}
           src={`/cards/${fname}.jpg`}
           alt="card"
           className="card-img"
@@ -218,9 +237,9 @@ function App() {
           onClick={() => {
             if (currentPlayerId !== socket.id) return;
             if (card.value === "wild" || card.value === "draw4") {
-              setPendingWildCard(card); // preserve exact card with id
+              setPendingWildCard(card);
             } else {
-              socket.emit("play-card", { card }); // send exact card object
+              socket.emit("play-card", { card });
             }
           }}
         />
@@ -228,7 +247,6 @@ function App() {
     });
   };
 
-  // Wild/draw4 color choose (uses exact card object with id)
   const handleWildColor = (color) => {
     setColorMessage(
       `Color selected: ${color.toUpperCase()}` +
@@ -241,7 +259,7 @@ function App() {
     setPendingWildCard(null);
   };
 
-  // POV layout: me at bottom; others clockwise to top/right/left
+  // Seat mapping relative to the local player
   const positions = ["player-bottom", "player-top", "player-right", "player-left"];
   const orderedPlayers = useMemo(() => {
     const idx = players.findIndex((p) => p.id === socket.id);
@@ -253,7 +271,7 @@ function App() {
 
   return (
     <div className="container">
-      {/* Small inline styles for UNO button / banners / winner */}
+      {/* Small inline styles for UNO button / banners / winner / round summary / scoreboard */}
       <style>{`
         .uno-btn {
           background:#ffdf00; color:#000; border:none; border-radius:999px;
@@ -268,18 +286,26 @@ function App() {
           position:absolute; top:12%; left:50%; transform:translateX(-50%);
           font-size:48px; font-weight:900; padding:.4rem 1rem; border-radius:10px;
           background:rgba(0,0,0,.55);
+          z-index: 1600;
         }
         .uno-banner.ok { color:#00ff95; text-shadow:0 0 16px rgba(0,255,149,.8); }
         .uno-banner.fail { color:#ff6262; text-shadow:0 0 16px rgba(255,98,98,.8); }
 
-        .win-overlay {
+        .overlay {
           position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
           background:rgba(0,0,0,.45); z-index:2000;
         }
-        .win-box {
+        .box {
           padding:1rem 1.5rem; border-radius:12px; background:#111a; color:#fff;
-          font-size:42px; font-weight:900; text-shadow:0 0 18px rgba(255,255,255,.6);
+          font-size:28px; font-weight:800; text-shadow:0 0 18px rgba(255,255,255,.5);
+          max-width:600px;
         }
+        .scoreboard {
+          position:absolute; top:8px; left:8px;
+          background:rgba(0,0,0,.35); padding:8px 12px; border-radius:8px; z-index:1400;
+          font-size:14px;
+        }
+        .scoreboard .title { font-weight:700; margin-bottom:4px; }
       `}</style>
 
       {!connected && <h2>Connecting…</h2>}
@@ -296,7 +322,7 @@ function App() {
         </form>
       )}
 
-      {connected && nameSubmitted && !gameStarted && (
+      {connected && nameSubmitted && !gameStarted && !winner && (
         <div>
           <h2>Lobby</h2>
           <ul>
@@ -312,27 +338,59 @@ function App() {
 
       {gameStarted && (
         <div className="game-area">
+          {/* Scoreboard */}
+          <div className="scoreboard">
+            <div className="title">Scores (to {targetScore})</div>
+            {players.map(p => (
+              <div key={p.id}>{p.name}: {scores[p.id] ?? 0}</div>
+            ))}
+          </div>
+
           {colorMessage && <div className="color-message">{colorMessage}</div>}
 
-          {/* UNO banners (3s) */}
+          {/* UNO banners (auto hides in 3s) */}
           {unoBanner && (
             <div className={`uno-banner ${unoBanner.ok ? "ok" : "fail"}`}>
               {unoBanner.text}
             </div>
           )}
 
-          {/* Winner popup */}
-          {winner && (
-            <div className="win-overlay">
-              <div className="win-box">{winner.name} wins the game!</div>
+          {/* Round summary (shown between rounds) */}
+          {roundSummary && (
+            <div className="overlay">
+              <div className="box">
+                <div style={{ fontSize: 22, marginBottom: 8 }}>
+                  Round winner: {players.find(x=>x.id===roundSummary.winnerId)?.name || "Player"}
+                </div>
+                <div style={{ fontSize: 16, marginBottom: 8 }}>Penalty points added:</div>
+                <ul style={{ margin: 0, paddingLeft: 18, textAlign: "left" }}>
+                  {roundSummary.breakdown.map(row => (
+                    <li key={row.playerId}>
+                      {row.name}: +{row.added} (total {row.total})
+                      {roundSummary.eliminatedIds?.includes(row.playerId) ? " — ELIMINATED" : ""}
+                    </li>
+                  ))}
+                </ul>
+                <div style={{ marginTop: 10, fontSize: 13, opacity: .85 }}>
+                  Next round starts automatically…
+                </div>
+              </div>
             </div>
           )}
 
+          {/* Tournament winner overlay */}
+          {winner && (
+            <div className="overlay">
+              <div className="box" style={{ fontSize: 34 }}>
+                {winner.name} wins the tournament!
+              </div>
+            </div>
+          )}
+
+          {/* Piles */}
           <div className="piles">
             <div
-              className={`draw-pile${
-                currentPlayerId !== socket.id || hasPlayableCard() ? " disabled" : ""
-              }`}
+              className={`draw-pile${currentPlayerId !== socket.id || hasPlayableCard() ? " disabled" : ""}`}
               onClick={handleDrawCard}
             >
               <img src="/cards/back.jpg" alt="Draw Deck" className="card-img" />
@@ -349,35 +407,23 @@ function App() {
             </div>
           </div>
 
+          {/* Players around the table */}
           {orderedPlayers.map((player, i) => {
             const pos = positions[i] || "player-bottom";
             const count = allHands[player.id]?.length || 0;
             const isSelf = player.id === socket.id;
             const isTurn = player.id === currentPlayerId;
-
-            // When more than 2 players, sides (left/right) keep vertical layout,
-            // but cards are rotated to be horizontally readable.
-            const isSide = pos === "player-right" || pos === "player-left";
-            const useSideColumn = players.length > 2 && isSide;
-            const handStyle = useSideColumn
-              ? { flexDirection: "column", alignItems: "center" }
-              : undefined;
-
             return (
               <div className={`player-zone ${pos} ${isTurn ? "current-turn" : ""}`} key={player.id}>
                 <div>{player.name}</div>
-                <div className="player-hand" style={handStyle}>
-                  {isSelf
-                    ? renderHandFan() // bottom: your cards
-                    : useSideColumn
-                    ? renderSideBackColumn(count, pos) // sides: vertical stack, each card rotated to horizontal
-                    : renderBackFan(count, pos) // top: horizontal fan, rotated 180°
-                  }
+                <div className="player-hand">
+                  {isSelf ? renderHandFan() : renderBackFan(count)}
                 </div>
               </div>
             );
           })}
 
+          {/* Wild / Draw4 color picker */}
           {pendingWildCard && (
             <div className="color-picker">
               <h3>Choose Color</h3>
@@ -393,16 +439,16 @@ function App() {
             </div>
           )}
 
-          {/* UNO button (enabled only when it's your pending UNO and you have exactly 1 card) */}
+          {/* UNO button (only active while you're the pending UNO player and you have 1 card) */}
           <div style={{ position: "absolute", bottom: 12, right: 12 }}>
             <button
               className="uno-btn"
-              disabled={!(unoPendingFor === socket.id && hand.length === 1)}
+              disabled={!myUnoActive}
               onMouseDown={() => setUnoPressed(true)}
               onMouseUp={() => setUnoPressed(false)}
               onMouseLeave={() => setUnoPressed(false)}
               onClick={() => socket.emit("declare-uno")}
-              title="Call UNO right now"
+              title="Call UNO now"
             >
               UNO
             </button>

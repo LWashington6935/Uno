@@ -44,6 +44,12 @@ body {
   gap: 5px;
 }
 
+/* Rotated hand containers for circular table effect */
+.player-top .player-hand    { transform: rotate(180deg); }
+.player-right .player-hand  { transform: rotate(-90deg); }
+.player-bottom .player-hand { transform: rotate(0deg); }
+.player-left .player-hand   { transform: rotate(90deg); }
+
 .player-top    { top: 5%;    left: 50%; transform: translateX(-50%); }
 .player-right  { top: 50%;   right: 5%; transform: translateY(-50%); }
 .player-bottom { bottom: 5%; left: 50%; transform: translateX(-50%); }
@@ -57,10 +63,22 @@ body {
   border-radius: 6px;
   transition: transform 0.2s;
 }
-.card-img:hover { transform: scale(1.1); }
+
+/* Only apply hover effect to your own cards (bottom player) */
+.player-bottom .card-img:hover { 
+  transform: scale(1.1); 
+}
+
 .card-img.disabled {
   opacity: 0.4;
   cursor: not-allowed;
+}
+
+/* Prevent hover effects on other players' rotated cards */
+.player-top .card-img:hover,
+.player-left .card-img:hover,
+.player-right .card-img:hover {
+  transform: none;
 }
 
 /* ===== Buttons ===== */
