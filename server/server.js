@@ -8,8 +8,17 @@ const app = express();
 app.use(cors());
 
 const server = http.createServer(app);
+
+// Production-ready CORS configuration
 const io = new Server(server, {
-  cors: { origin: "http://localhost:5173", methods: ["GET", "POST"] },
+  cors: { 
+    origin: [
+      "http://localhost:5173", 
+      "http://localhost:3000",
+      process.env.CLIENT_URL || "https://yourgame.vercel.app"
+    ], 
+    methods: ["GET", "POST"] 
+  },
 });
 
 // -------- Game / Tournament State --------
@@ -340,7 +349,8 @@ io.on("connection", (socket) => {
 });
 
 // -------- Boot --------
-server.listen(3001, () => console.log("🚀 Server running on port 3001"));
+const PORT = process.env.PORT || 3001;
+server.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
 
 // -------- Deck helpers --------
 function createDeck() {
