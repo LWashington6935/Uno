@@ -3,8 +3,8 @@ import React, { useState, useEffect, useMemo } from "react";
 import { io } from "socket.io-client";
 import "./App.css";
 
-// Socket.IO client
-const socket = io("http://localhost:3001", {
+// Socket.IO client - connects to production server or localhost
+const socket = io(import.meta.env.VITE_SERVER_URL || "http://localhost:3001", {
   transports: ["websocket"],
   reconnectionAttempts: 5,
 });
