@@ -3,10 +3,12 @@ import React, { useState, useEffect, useMemo } from "react";
 import { io } from "socket.io-client";
 import "./App.css";
 
-// Socket.IO client - connects to production server or localhost
+// Socket.IO client - Fixed WebSocket configuration with fallbacks
 const socket = io(import.meta.env.VITE_SERVER_URL || "http://localhost:3001", {
-  transports: ["websocket"],
-  reconnectionAttempts: 5,
+  transports: ["websocket", "polling"], // Add polling fallback for WebSocket issues
+  reconnectionAttempts: 10,             // Increase reconnection attempts
+  timeout: 20000,                       // Increase timeout to 20 seconds
+  forceNew: true,                       // Force new connection
 });
 
 // Remove exactly ONE instance of a played card from a hand.
@@ -54,9 +56,40 @@ function App() {
   const [roundSummary, setRoundSummary] = useState(null);   // { winnerId, breakdown[], eliminatedIds[] }
   const [winner, setWinner] = useState(null);               // { playerId, name }
 
+  // Connection status debugging
+  const [connectionStatus, setConnectionStatus] = useState("Connecting...");
+
   // ---------- Socket wiring ----------
   useEffect(() => {
-    socket.on("connect", () => setConnected(true));
+    // Connection status handlers
+    socket.on("connect", () => {
+      console.log("Connected to server:", socket.id);
+      setConnected(true);
+      setConnectionStatus("Connected!");
+    });
+
+    socket.on("disconnect", (reason) => {
+      console.log("Disconnected:", reason);
+      setConnected(false);
+      setConnectionStatus(`Disconnected: ${reason}`);
+    });
+
+    socket.on("connect_error", (error) => {
+      console.error("Connection error:", error);
+      setConnectionStatus(`Connection failed: ${error.message}`);
+    });
+
+    socket.on("reconnect", (attemptNumber) => {
+      console.log("Reconnected after", attemptNumber, "attempts");
+      setConnectionStatus("Reconnected!");
+    });
+
+    socket.on("reconnect_error", (error) => {
+      console.error("Reconnection error:", error);
+      setConnectionStatus("Reconnection failed");
+    });
+
+    // Game event handlers
     socket.on("update-players", setPlayers);
     socket.on("invalid-play", ({ message }) => alert(message));
 
@@ -160,6 +193,10 @@ function App() {
 
     return () => {
       socket.off("connect");
+      socket.off("disconnect");
+      socket.off("connect_error");
+      socket.off("reconnect");
+      socket.off("reconnect_error");
       socket.off("update-players");
       socket.off("invalid-play");
       socket.off("game-started");
@@ -306,9 +343,20 @@ function App() {
           font-size:14px;
         }
         .scoreboard .title { font-weight:700; margin-bottom:4px; }
+
+        .connection-status {
+          position:absolute; top:8px; right:8px;
+          background:rgba(0,0,0,.35); padding:8px 12px; border-radius:8px; z-index:1400;
+          font-size:12px; color: ${connected ? '#00ff95' : '#ff6262'};
+        }
       `}</style>
 
-      {!connected && <h2>Connecting…</h2>}
+      {/* Connection status indicator */}
+      <div className="connection-status">
+        {connectionStatus}
+      </div>
+
+      {!connected && <h2>{connectionStatus}</h2>}
 
       {connected && !nameSubmitted && (
         <form onSubmit={handleNameSubmit}>

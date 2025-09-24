@@ -9,16 +9,40 @@ app.use(cors());
 
 const server = http.createServer(app);
 
-// Production-ready CORS configuration
+// Enhanced CORS configuration for WebSocket connections
 const io = new Server(server, {
   cors: { 
     origin: [
       "http://localhost:5173", 
       "http://localhost:3000",
+      "https://unogame-eta.vercel.app",  // Your exact Vercel URL
       process.env.CLIENT_URL || "https://yourgame.vercel.app"
     ], 
-    methods: ["GET", "POST"] 
+    methods: ["GET", "POST"],
+    credentials: true,
+    allowedHeaders: ["Content-Type"]
   },
+  transports: ['websocket', 'polling'],  // Enable both transports
+  allowEIO3: true                        // Enable Engine.IO v3 compatibility
+});
+
+// Health check endpoint to prevent server sleep
+app.get('/health', (req, res) => {
+  res.json({ 
+    status: 'OK', 
+    timestamp: new Date(),
+    uptime: process.uptime(),
+    connections: io.sockets.sockets.size
+  });
+});
+
+// Basic route
+app.get('/', (req, res) => {
+  res.json({ 
+    message: 'UNO Game Server is running!',
+    socketConnections: io.sockets.sockets.size,
+    timestamp: new Date()
+  });
 });
 
 // -------- Game / Tournament State --------
@@ -170,10 +194,35 @@ function settlePendingUnoBeforeAction() {
   io.emit("uno-result", { playerId: offender, ok: false, penalty: 2 });
 }
 
-// -------- Socket.IO --------
+// -------- Socket.IO with Enhanced Debugging --------
 io.on("connection", (socket) => {
+  console.log(`✅ Client connected: ${socket.id} (Total: ${io.sockets.sockets.size})`);
+  
+  socket.on("disconnect", (reason) => {
+    console.log(`❌ Client disconnected: ${socket.id} - Reason: ${reason} (Remaining: ${io.sockets.sockets.size - 1})`);
+    
+    const leavingIndex = players.findIndex((p) => p.id === socket.id);
+    players = players.filter((p) => p.id !== socket.id);
+    delete handsById[socket.id];
+
+    if (!gameOver && players.length > 0) {
+      if (leavingIndex !== -1 && leavingIndex <= currentTurnIndex) {
+        currentTurnIndex = mod(currentTurnIndex - 1, players.length);
+      }
+      if (unoPendingFor === socket.id) unoPendingFor = null;
+    }
+
+    io.emit("update-players", players);
+    io.emit("update-hands", handsById);
+  });
+
+  socket.on("error", (error) => {
+    console.error(`🔥 Socket error for ${socket.id}:`, error);
+  });
+
   socket.on("new-player", (username) => {
     if (gameOver) return;
+    console.log(`👤 New player joined: ${username} (${socket.id})`);
     players.push({ id: socket.id, name: username });
     scores[socket.id] = scores[socket.id] || 0;
     io.emit("update-players", players);
@@ -181,6 +230,7 @@ io.on("connection", (socket) => {
 
   socket.on("start-game", () => {
     if (players.length === 0) return;
+    console.log(`🎮 Game started with ${players.length} players`);
     // Fresh tournament: reset scores and flags
     scores = {};
     players.forEach((p) => (scores[p.id] = 0));
@@ -193,6 +243,7 @@ io.on("connection", (socket) => {
     const allowed = [100, 200, 300, 400, 500, 1000];
     if (allowed.includes(Number(val))) {
       targetScore = Number(val);
+      console.log(`🎯 Target score changed to: ${targetScore}`);
       io.emit("scores-updated", { scores, targetScore });
     }
   });
@@ -204,6 +255,7 @@ io.on("connection", (socket) => {
     const myCount = (handsById[me] || []).length;
     if (unoPendingFor === me && myCount === 1) {
       unoPendingFor = null;
+      console.log(`🎯 ${socket.id} successfully declared UNO!`);
       io.emit("uno-result", { playerId: me, ok: true, penalty: 0 });
     } else {
       socket.emit("invalid-play", { message: "UNO not required or wrong timing." });
@@ -243,12 +295,15 @@ io.on("connection", (socket) => {
       handsById[me].splice(cardIndex, 1);
     }
 
+    console.log(`🃏 ${socket.id} played ${card.color} ${card.value}`);
+
     topCard = card;
 
     // Round end or UNO window
     const remaining = (handsById[me]?.length ?? 0);
 
     if (remaining === 0) {
+      console.log(`🏆 ${socket.id} won the round!`);
       // Round ends immediately – score others, then new round or tournament end
       io.emit("update-hands", handsById);
       io.emit("card-played", { card, playerId: me, nextPlayerId: null, topCard });
@@ -262,6 +317,7 @@ io.on("connection", (socket) => {
         io.emit("uno-result", { playerId: me, ok: true, penalty: 0 });
       } else if (unoPendingFor !== me) {
         unoPendingFor = me;
+        console.log(`⚠️ ${socket.id} has 1 card but didn't declare UNO!`);
         io.emit("uno-window", { playerId: me });
       }
     } else {
@@ -320,6 +376,8 @@ io.on("connection", (socket) => {
     (handsById[me] ||= []).push(drawn);
     socket.emit("card-drawn", drawn);
 
+    console.log(`📥 ${socket.id} drew a card`);
+
     const canPlayDrawn =
       isPlayable(drawn, topCard) &&
       !(drawn.value === "draw4" && hasColorInHand(handsById[me], topCard.color));
@@ -329,28 +387,20 @@ io.on("connection", (socket) => {
       io.emit("turn-changed", players[currentTurnIndex]?.id || null);
     }
   });
-
-  // Disconnect
-  socket.on("disconnect", () => {
-    const leavingIndex = players.findIndex((p) => p.id === socket.id);
-    players = players.filter((p) => p.id !== socket.id);
-    delete handsById[socket.id];
-
-    if (!gameOver && players.length > 0) {
-      if (leavingIndex !== -1 && leavingIndex <= currentTurnIndex) {
-        currentTurnIndex = mod(currentTurnIndex - 1, players.length);
-      }
-      if (unoPendingFor === socket.id) unoPendingFor = null;
-    }
-
-    io.emit("update-players", players);
-    io.emit("update-hands", handsById);
-  });
 });
 
 // -------- Boot --------
 const PORT = process.env.PORT || 3001;
-server.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
+server.listen(PORT, () => {
+  console.log(`🚀 UNO Server running on port ${PORT}`);
+  console.log(`📍 Server URL: ${process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`}`);
+  console.log(`🌐 Client URL: ${process.env.CLIENT_URL || 'http://localhost:5173'}`);
+});
+
+// Log server stats every 30 seconds
+setInterval(() => {
+  console.log(`📊 Server Stats - Connections: ${io.sockets.sockets.size}, Players: ${players.length}, Game Active: ${!gameOver}`);
+}, 30000);
 
 // -------- Deck helpers --------
 function createDeck() {
