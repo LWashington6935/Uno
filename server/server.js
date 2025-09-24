@@ -8,61 +8,184 @@ const app = express();
 app.use(cors());
 
 const server = http.createServer(app);
-
-// Enhanced CORS configuration for WebSocket connections
 const io = new Server(server, {
-  cors: { 
-    origin: [
-      "http://localhost:5173", 
-      "http://localhost:3000",
-      "https://unogame-eta.vercel.app",  // Your exact Vercel URL
-      process.env.CLIENT_URL || "https://yourgame.vercel.app"
-    ], 
-    methods: ["GET", "POST"],
-    credentials: true,
-    allowedHeaders: ["Content-Type"]
+  cors: {
+    origin: "*",
+    methods: ["GET", "POST"]
   },
-  transports: ['websocket', 'polling'],  // Enable both transports
-  allowEIO3: true                        // Enable Engine.IO v3 compatibility
+  transports: ['polling', 'websocket'],
+  allowEIO3: true
 });
 
-// Health check endpoint to prevent server sleep
+// Routes
+app.get('/', (req, res) => {
+  res.json({ 
+    message: 'UNO Server Running', 
+    rooms: rooms.size, 
+    totalPlayers: getTotalPlayers(),
+    time: new Date() 
+  });
+});
+
 app.get('/health', (req, res) => {
   res.json({ 
     status: 'OK', 
-    timestamp: new Date(),
-    uptime: process.uptime(),
-    connections: io.sockets.sockets.size
+    connections: io.sockets.sockets.size,
+    activeRooms: rooms.size 
   });
 });
 
-// Basic route
-app.get('/', (req, res) => {
-  res.json({ 
-    message: 'UNO Game Server is running!',
-    socketConnections: io.sockets.sockets.size,
-    timestamp: new Date()
-  });
-});
+// -------- Room-Based Game State --------
+const rooms = new Map(); // roomId -> roomData
+const playerRooms = new Map(); // socketId -> roomId
 
-// -------- Game / Tournament State --------
-let players = [];          // [{ id, name }]
-let deck = [];             // array of { color, value }
-let handsById = {};        // { socketId: [cards] }
-let topCard = null;        // current top of discard pile
-let currentTurnIndex = 0;  // index into players[]
-let direction = 1;         // +1 forward, -1 reverse
-
-let unoPendingFor = null;  // socket id who must call UNO
-let gameOver = false;      // tournament finished?
-
-// Tournament scoring
-let scores = {};           // cumulative penalty points: { socketId: number }
-let targetScore = 500;     // eliminate at or above this threshold
-
+const MAX_PLAYERS_PER_ROOM = 8;
 const mod = (n, m) => ((n % m) + m) % m;
 
-// -------- Helpers --------
+// Room structure
+function createRoomData() {
+  return {
+    // Room info
+    id: '',
+    status: 'waiting', // 'waiting', 'active', 'finished'
+    host: null,
+    maxPlayers: MAX_PLAYERS_PER_ROOM,
+    
+    // Game state (same as before but per room)
+    players: [],
+    deck: [],
+    handsById: {},
+    topCard: null,
+    currentTurnIndex: 0,
+    direction: 1,
+    unoPendingFor: null,
+    gameOver: false,
+    scores: {},
+    targetScore: 500,
+    
+    // Timestamps
+    created: new Date(),
+    lastActivity: new Date()
+  };
+}
+
+// -------- Room Management --------
+function generateRoomId() {
+  return Math.random().toString(36).substring(2, 8).toUpperCase();
+}
+
+function createRoom(hostId, customRoomId = null) {
+  const roomId = customRoomId || generateRoomId();
+  
+  if (rooms.has(roomId)) {
+    return { success: false, error: 'Room already exists' };
+  }
+  
+  const roomData = createRoomData();
+  roomData.id = roomId;
+  roomData.host = hostId;
+  
+  rooms.set(roomId, roomData);
+  console.log(`Room ${roomId} created by ${hostId}`);
+  
+  return { success: true, roomId, roomData };
+}
+
+function joinRoom(roomId, playerId, playerName) {
+  const room = rooms.get(roomId);
+  if (!room) {
+    return { success: false, error: 'Room not found' };
+  }
+  
+  if (room.status === 'active') {
+    return { success: false, error: 'Game in progress' };
+  }
+  
+  if (room.players.length >= room.maxPlayers) {
+    return { success: false, error: 'Room is full' };
+  }
+  
+  if (room.players.some(p => p.id === playerId)) {
+    return { success: false, error: 'Already in room' };
+  }
+  
+  // Add player to room
+  room.players.push({ id: playerId, name: playerName });
+  room.scores[playerId] = 0;
+  room.lastActivity = new Date();
+  
+  // Track player's room
+  playerRooms.set(playerId, roomId);
+  
+  console.log(`Player ${playerName} (${playerId}) joined room ${roomId}`);
+  return { success: true, room };
+}
+
+function leaveRoom(playerId) {
+  const roomId = playerRooms.get(playerId);
+  if (!roomId) return { success: false, error: 'Not in a room' };
+  
+  const room = rooms.get(roomId);
+  if (!room) return { success: false, error: 'Room not found' };
+  
+  // Remove player from room
+  room.players = room.players.filter(p => p.id !== playerId);
+  delete room.handsById[playerId];
+  delete room.scores[playerId];
+  
+  // Clear UNO pending if it was this player
+  if (room.unoPendingFor === playerId) {
+    room.unoPendingFor = null;
+  }
+  
+  // Adjust turn index if needed
+  if (room.players.length > 0 && room.currentTurnIndex >= room.players.length) {
+    room.currentTurnIndex = 0;
+  }
+  
+  playerRooms.delete(playerId);
+  
+  // Transfer host if host left and room not empty
+  if (room.host === playerId && room.players.length > 0) {
+    room.host = room.players[0].id;
+  }
+  
+  // Clean up empty room
+  if (room.players.length === 0) {
+    rooms.delete(roomId);
+    console.log(`Room ${roomId} deleted - empty`);
+  } else {
+    room.lastActivity = new Date();
+  }
+  
+  return { success: true, roomId, room };
+}
+
+function getRoomsList() {
+  const roomsList = [];
+  rooms.forEach((room, roomId) => {
+    if (room.status === 'waiting') {
+      roomsList.push({
+        id: roomId,
+        playerCount: room.players.length,
+        maxPlayers: room.maxPlayers,
+        host: room.players.find(p => p.id === room.host)?.name || 'Unknown',
+        created: room.created
+      });
+    }
+  });
+  return roomsList;
+}
+
+function getTotalPlayers() {
+  let total = 0;
+  rooms.forEach(room => {
+    total += room.players.length;
+  });
+  return total;
+}
+
+// -------- Game Helper Functions (Room-Aware) --------
 function isPlayable(card, top) {
   return (
     card.color === top.color ||
@@ -71,338 +194,385 @@ function isPlayable(card, top) {
     card.value === "draw4"
   );
 }
+
 function hasColorInHand(hand, color) {
   return hand.some((c) => c.color === color);
 }
-function giveCards(playerId, n) {
-  const drawn = deck.splice(0, n);
+
+function giveCards(roomId, playerId, n) {
+  const room = rooms.get(roomId);
+  if (!room) return;
+  
+  const drawn = room.deck.splice(0, n);
   drawn.forEach((d) => {
-    (handsById[playerId] ||= []).push(d);
+    (room.handsById[playerId] ||= []).push(d);
     io.to(playerId).emit("card-drawn", d);
   });
 }
-function advanceTurn(steps = 1) {
-  if (players.length === 0) return;
-  currentTurnIndex = mod(currentTurnIndex + steps * direction, players.length);
+
+function advanceTurn(roomId, steps = 1) {
+  const room = rooms.get(roomId);
+  if (!room || room.players.length === 0) return;
+  room.currentTurnIndex = mod(room.currentTurnIndex + steps * room.direction, room.players.length);
 }
 
-// Card values for scoring
 function cardPoints(c) {
   if (c.value === "wild" || c.value === "draw4") return 50;
   if (c.value === "skip" || c.value === "reverse" || c.value === "draw2") return 20;
   const n = Number(c.value);
   return Number.isFinite(n) ? n : 0;
 }
+
 function handPoints(hand = []) {
   return hand.reduce((sum, c) => sum + cardPoints(c), 0);
 }
 
-// Get a valid starting card (no wilds or draw4s)
 function getValidStartCard(deckArray) {
   let cardIndex = 0;
   while (cardIndex < deckArray.length) {
     const card = deckArray[cardIndex];
     if (card.value !== "wild" && card.value !== "draw4") {
-      // Remove this card from deck and return it
       return deckArray.splice(cardIndex, 1)[0];
     }
     cardIndex++;
   }
-  // Fallback - shouldn't happen with a proper deck
   return deckArray.shift();
 }
 
-// Start a *round* with current players (scores persist)
-function startRound() {
-  deck = shuffleDeck(createDeck());
-  handsById = dealHands(players, deck);
+function startRound(roomId) {
+  const room = rooms.get(roomId);
+  if (!room) return;
   
-  // Get a valid starting card (no wilds or draw4s)
-  topCard = getValidStartCard(deck);
-  
-  currentTurnIndex = 0;
-  direction = 1;
-  unoPendingFor = null;
+  room.deck = shuffleDeck(createDeck());
+  room.handsById = dealHands(room.players, room.deck);
+  room.topCard = getValidStartCard(room.deck);
+  room.currentTurnIndex = 0;
+  room.direction = 1;
+  room.unoPendingFor = null;
+  room.lastActivity = new Date();
 
-  io.emit("game-started", {
-    hands: handsById,
-    topCard,
-    currentPlayerId: players[currentTurnIndex]?.id || null,
-    scores,                 // NEW: send cumulative scores
-    targetScore,            // for UI display
-    playerOrder: players,   // keep client aligned if needed
+  io.to(roomId).emit("game-started", {
+    hands: room.handsById,
+    topCard: room.topCard,
+    currentPlayerId: room.players[room.currentTurnIndex]?.id || null,
+    scores: room.scores,
+    targetScore: room.targetScore,
+    playerOrder: room.players,
   });
 }
 
-// End a *round* (somebody went out): score others, update totals, eliminate, continue or end.
-function endRound(winnerId) {
-  // Build scoring breakdown
-  const breakdown = players.map((p) => {
-    const added = p.id === winnerId ? 0 : handPoints(handsById[p.id] || []);
-    scores[p.id] = (scores[p.id] || 0) + added;
-    return { playerId: p.id, name: p.name, added, total: scores[p.id] };
+function endRound(roomId, winnerId) {
+  const room = rooms.get(roomId);
+  if (!room) return;
+
+  const breakdown = room.players.map((p) => {
+    const added = p.id === winnerId ? 0 : handPoints(room.handsById[p.id] || []);
+    room.scores[p.id] = (room.scores[p.id] || 0) + added;
+    return { playerId: p.id, name: p.name, added, total: room.scores[p.id] };
   });
 
-  // Eliminations
   const eliminatedIds = [];
-  players = players.filter((p) => {
-    if ((scores[p.id] || 0) >= targetScore) {
+  room.players = room.players.filter((p) => {
+    if ((room.scores[p.id] || 0) >= room.targetScore) {
       eliminatedIds.push(p.id);
-      delete handsById[p.id];
+      delete room.handsById[p.id];
       return false;
     }
     return true;
   });
 
-  // Adjust currentTurnIndex into new players list
-  currentTurnIndex = 0;
-  direction = 1;
-  unoPendingFor = null;
+  room.currentTurnIndex = 0;
+  room.direction = 1;
+  room.unoPendingFor = null;
 
-  // Tournament winner?
-  if (players.length <= 1) {
-    gameOver = true;
-    const champion = players[0] || null;
-    io.emit("tournament-won", {
+  if (room.players.length <= 1) {
+    room.gameOver = true;
+    room.status = 'finished';
+    const champion = room.players[0] || null;
+    
+    io.to(roomId).emit("tournament-won", {
       championId: champion?.id || null,
       championName: champion?.name || "No one",
-      scores,
+      scores: room.scores,
       breakdown,
       eliminatedIds,
-      targetScore,
+      targetScore: room.targetScore,
     });
+    
+    // Auto-cleanup finished rooms after 5 minutes
+    setTimeout(() => {
+      if (rooms.has(roomId) && room.status === 'finished') {
+        rooms.delete(roomId);
+        console.log(`Room ${roomId} auto-deleted - finished`);
+      }
+    }, 300000); // 5 minutes
+    
     return;
   }
 
-  // Inform clients and auto-start next round after a short delay
-  io.emit("round-ended", {
+  io.to(roomId).emit("round-ended", {
     winnerId,
-    scores,
+    scores: room.scores,
     breakdown,
     eliminatedIds,
-    targetScore,
+    targetScore: room.targetScore,
   });
 
-  setTimeout(() => startRound(), 2500);
+  setTimeout(() => startRound(roomId), 2500);
 }
 
-function settlePendingUnoBeforeAction() {
-  if (!unoPendingFor) return;
-  const offender = unoPendingFor;
-  unoPendingFor = null;
-  giveCards(offender, 2);
-  io.emit("uno-result", { playerId: offender, ok: false, penalty: 2 });
-}
-
-// -------- Socket.IO with Enhanced Debugging --------
-io.on("connection", (socket) => {
-  console.log(`✅ Client connected: ${socket.id} (Total: ${io.sockets.sockets.size})`);
+function settlePendingUnoBeforeAction(roomId) {
+  const room = rooms.get(roomId);
+  if (!room || !room.unoPendingFor) return;
   
-  socket.on("disconnect", (reason) => {
-    console.log(`❌ Client disconnected: ${socket.id} - Reason: ${reason} (Remaining: ${io.sockets.sockets.size - 1})`);
+  const offender = room.unoPendingFor;
+  room.unoPendingFor = null;
+  giveCards(roomId, offender, 2);
+  io.to(roomId).emit("uno-result", { playerId: offender, ok: false, penalty: 2 });
+}
+
+// -------- Socket Events --------
+io.on("connection", (socket) => {
+  console.log("Client connected:", socket.id);
+
+  // Room management events
+  socket.on("create-room", ({ roomId, playerName }) => {
+    const result = createRoom(socket.id, roomId);
     
-    const leavingIndex = players.findIndex((p) => p.id === socket.id);
-    players = players.filter((p) => p.id !== socket.id);
-    delete handsById[socket.id];
-
-    if (!gameOver && players.length > 0) {
-      if (leavingIndex !== -1 && leavingIndex <= currentTurnIndex) {
-        currentTurnIndex = mod(currentTurnIndex - 1, players.length);
-      }
-      if (unoPendingFor === socket.id) unoPendingFor = null;
+    if (result.success) {
+      socket.join(result.roomId);
+      joinRoom(result.roomId, socket.id, playerName);
+      
+      socket.emit("room-created", { 
+        roomId: result.roomId, 
+        room: rooms.get(result.roomId) 
+      });
+      
+      io.to(result.roomId).emit("room-updated", rooms.get(result.roomId));
+    } else {
+      socket.emit("room-error", { message: result.error });
     }
-
-    io.emit("update-players", players);
-    io.emit("update-hands", handsById);
+  });
+  
+  socket.on("join-room", ({ roomId, playerName }) => {
+    const result = joinRoom(roomId, socket.id, playerName);
+    
+    if (result.success) {
+      socket.join(roomId);
+      socket.emit("room-joined", { roomId, room: result.room });
+      io.to(roomId).emit("room-updated", result.room);
+    } else {
+      socket.emit("room-error", { message: result.error });
+    }
+  });
+  
+  socket.on("leave-room", () => {
+    const result = leaveRoom(socket.id);
+    if (result.success) {
+      socket.leave(result.roomId);
+      socket.emit("room-left");
+      if (result.room) {
+        io.to(result.roomId).emit("room-updated", result.room);
+      }
+    }
+  });
+  
+  socket.on("get-rooms", () => {
+    socket.emit("rooms-list", getRoomsList());
   });
 
-  socket.on("error", (error) => {
-    console.error(`🔥 Socket error for ${socket.id}:`, error);
-  });
-
-  socket.on("new-player", (username) => {
-    if (gameOver) return;
-    console.log(`👤 New player joined: ${username} (${socket.id})`);
-    players.push({ id: socket.id, name: username });
-    scores[socket.id] = scores[socket.id] || 0;
-    io.emit("update-players", players);
-  });
-
+  // Game events (room-aware)
   socket.on("start-game", () => {
-    if (players.length === 0) return;
-    console.log(`🎮 Game started with ${players.length} players`);
-    // Fresh tournament: reset scores and flags
-    scores = {};
-    players.forEach((p) => (scores[p.id] = 0));
-    gameOver = false;
-    startRound();
+    const roomId = playerRooms.get(socket.id);
+    const room = rooms.get(roomId);
+    
+    if (!room || room.host !== socket.id) return;
+    if (room.players.length === 0) return;
+    
+    // Reset scores and start tournament
+    room.scores = {};
+    room.players.forEach((p) => (room.scores[p.id] = 0));
+    room.gameOver = false;
+    room.status = 'active';
+    
+    startRound(roomId);
   });
 
-  // Optional: host could change target score
   socket.on("set-target-score", (val) => {
+    const roomId = playerRooms.get(socket.id);
+    const room = rooms.get(roomId);
+    
+    if (!room || room.host !== socket.id) return;
+    
     const allowed = [100, 200, 300, 400, 500, 1000];
     if (allowed.includes(Number(val))) {
-      targetScore = Number(val);
-      console.log(`🎯 Target score changed to: ${targetScore}`);
-      io.emit("scores-updated", { scores, targetScore });
+      room.targetScore = Number(val);
+      io.to(roomId).emit("scores-updated", { scores: room.scores, targetScore: room.targetScore });
     }
   });
 
-  // Declare UNO (button)
   socket.on("declare-uno", () => {
-    if (gameOver) return;
+    const roomId = playerRooms.get(socket.id);
+    const room = rooms.get(roomId);
+    
+    if (!room || room.gameOver) return;
+    
     const me = socket.id;
-    const myCount = (handsById[me] || []).length;
-    if (unoPendingFor === me && myCount === 1) {
-      unoPendingFor = null;
-      console.log(`🎯 ${socket.id} successfully declared UNO!`);
-      io.emit("uno-result", { playerId: me, ok: true, penalty: 0 });
+    const myCount = (room.handsById[me] || []).length;
+    if (room.unoPendingFor === me && myCount === 1) {
+      room.unoPendingFor = null;
+      io.to(roomId).emit("uno-result", { playerId: me, ok: true, penalty: 0 });
     } else {
       socket.emit("invalid-play", { message: "UNO not required or wrong timing." });
     }
   });
 
-  // Play a card
   socket.on("play-card", ({ card, unoDeclared = false }) => {
-    if (gameOver) return;
+    const roomId = playerRooms.get(socket.id);
+    const room = rooms.get(roomId);
+    
+    if (!room || room.gameOver || room.status !== 'active') return;
 
-    settlePendingUnoBeforeAction();
+    settlePendingUnoBeforeAction(roomId);
 
     const me = socket.id;
-    const myIdx = players.findIndex((p) => p.id === me);
-    if (myIdx !== currentTurnIndex) return; // not your turn
+    const myIdx = room.players.findIndex((p) => p.id === me);
+    if (myIdx !== room.currentTurnIndex) return;
 
-    if (card.value === "draw4" && hasColorInHand(handsById[me] || [], topCard.color)) {
+    if (card.value === "draw4" && hasColorInHand(room.handsById[me] || [], room.topCard.color)) {
       return socket.emit("invalid-play", {
-        message: `Cannot play Draw 4 when you have ${topCard.color} cards.`,
+        message: `Cannot play Draw 4 when you have ${room.topCard.color} cards.`,
       });
     }
 
-    if (!isPlayable(card, topCard)) {
+    if (!isPlayable(card, room.topCard)) {
       return socket.emit("invalid-play", { message: "Invalid card play." });
     }
 
-    // Remove exactly ONE copy of the played card
     function sameCard(a, b) {
       if (b.value === "wild" || b.value === "draw4") return a.value === b.value;
       return a.color === b.color && a.value === b.value;
     }
     
-    // FIXED: Remove only the FIRST matching card, not all matches
-    const myHand = handsById[me] || [];
+    const myHand = room.handsById[me] || [];
     const cardIndex = myHand.findIndex(c => sameCard(c, card));
     if (cardIndex !== -1) {
-      handsById[me].splice(cardIndex, 1);
+      room.handsById[me].splice(cardIndex, 1);
     }
 
-    console.log(`🃏 ${socket.id} played ${card.color} ${card.value}`);
-
-    topCard = card;
-
-    // Round end or UNO window
-    const remaining = (handsById[me]?.length ?? 0);
+    room.topCard = card;
+    room.lastActivity = new Date();
+    const remaining = (room.handsById[me]?.length ?? 0);
 
     if (remaining === 0) {
-      console.log(`🏆 ${socket.id} won the round!`);
-      // Round ends immediately – score others, then new round or tournament end
-      io.emit("update-hands", handsById);
-      io.emit("card-played", { card, playerId: me, nextPlayerId: null, topCard });
-      endRound(me);
+      io.to(roomId).emit("update-hands", room.handsById);
+      io.to(roomId).emit("card-played", { card, playerId: me, nextPlayerId: null, topCard: room.topCard });
+      endRound(roomId, me);
       return;
     }
 
     if (remaining === 1) {
       if (unoDeclared === true) {
-        if (unoPendingFor === me) unoPendingFor = null;
-        io.emit("uno-result", { playerId: me, ok: true, penalty: 0 });
-      } else if (unoPendingFor !== me) {
-        unoPendingFor = me;
-        console.log(`⚠️ ${socket.id} has 1 card but didn't declare UNO!`);
-        io.emit("uno-window", { playerId: me });
+        if (room.unoPendingFor === me) room.unoPendingFor = null;
+        io.to(roomId).emit("uno-result", { playerId: me, ok: true, penalty: 0 });
+      } else if (room.unoPendingFor !== me) {
+        room.unoPendingFor = me;
+        io.to(roomId).emit("uno-window", { playerId: me });
       }
     } else {
-      if (unoPendingFor === me) unoPendingFor = null;
+      if (room.unoPendingFor === me) room.unoPendingFor = null;
     }
 
-    // Action cards / advance
     switch (card.value) {
       case "skip":
-        advanceTurn(2);
+        advanceTurn(roomId, 2);
         break;
       case "reverse":
-        direction *= -1;
-        if (players.length !== 2) advanceTurn(1);
+        room.direction *= -1;
+        if (room.players.length !== 2) advanceTurn(roomId, 1);
         break;
       case "draw2": {
-        const nextIdx = mod(currentTurnIndex + direction, players.length);
-        const nextId = players[nextIdx].id;
-        giveCards(nextId, 2);
-        advanceTurn(2);
+        const nextIdx = mod(room.currentTurnIndex + room.direction, room.players.length);
+        const nextId = room.players[nextIdx].id;
+        giveCards(roomId, nextId, 2);
+        advanceTurn(roomId, 2);
         break;
       }
       case "draw4": {
-        const nextIdx4 = mod(currentTurnIndex + direction, players.length);
-        const nextId4 = players[nextIdx4].id;
-        giveCards(nextId4, 4);
-        advanceTurn(2);
+        const nextIdx4 = mod(room.currentTurnIndex + room.direction, room.players.length);
+        const nextId4 = room.players[nextIdx4].id;
+        giveCards(roomId, nextId4, 4);
+        advanceTurn(roomId, 2);
         break;
       }
       default:
-        advanceTurn(1);
+        advanceTurn(roomId, 1);
     }
 
-    io.emit("card-played", {
+    io.to(roomId).emit("card-played", {
       card,
       playerId: me,
-      nextPlayerId: players[currentTurnIndex]?.id || null,
-      topCard,
+      nextPlayerId: room.players[room.currentTurnIndex]?.id || null,
+      topCard: room.topCard,
     });
-    io.emit("update-hands", handsById);
+    io.to(roomId).emit("update-hands", room.handsById);
   });
 
-  // Draw a card (no playable card)
   socket.on("draw-card", () => {
-    if (gameOver) return;
+    const roomId = playerRooms.get(socket.id);
+    const room = rooms.get(roomId);
+    
+    if (!room || room.gameOver || room.status !== 'active') return;
 
-    settlePendingUnoBeforeAction();
+    settlePendingUnoBeforeAction(roomId);
 
     const me = socket.id;
-    const myIdx = players.findIndex((p) => p.id === me);
-    if (myIdx !== currentTurnIndex) return;
+    const myIdx = room.players.findIndex((p) => p.id === me);
+    if (myIdx !== room.currentTurnIndex) return;
 
-    const drawn = deck.shift();
+    const drawn = room.deck.shift();
     if (!drawn) return;
 
-    (handsById[me] ||= []).push(drawn);
+    (room.handsById[me] ||= []).push(drawn);
     socket.emit("card-drawn", drawn);
-
-    console.log(`📥 ${socket.id} drew a card`);
+    room.lastActivity = new Date();
 
     const canPlayDrawn =
-      isPlayable(drawn, topCard) &&
-      !(drawn.value === "draw4" && hasColorInHand(handsById[me], topCard.color));
+      isPlayable(drawn, room.topCard) &&
+      !(drawn.value === "draw4" && hasColorInHand(room.handsById[me], room.topCard.color));
 
     if (!canPlayDrawn) {
-      advanceTurn(1);
-      io.emit("turn-changed", players[currentTurnIndex]?.id || null);
+      advanceTurn(roomId, 1);
+      io.to(roomId).emit("turn-changed", room.players[room.currentTurnIndex]?.id || null);
     }
+  });
+
+  socket.on("disconnect", () => {
+    console.log("Client disconnected:", socket.id);
+    leaveRoom(socket.id);
   });
 });
 
-// -------- Boot --------
+// -------- Start Server --------
 const PORT = process.env.PORT || 3001;
 server.listen(PORT, () => {
-  console.log(`🚀 UNO Server running on port ${PORT}`);
-  console.log(`📍 Server URL: ${process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`}`);
-  console.log(`🌐 Client URL: ${process.env.CLIENT_URL || 'http://localhost:5173'}`);
+  console.log(`UNO Server running on port ${PORT}`);
 });
 
-// Log server stats every 30 seconds
+// Cleanup old rooms every 30 minutes
 setInterval(() => {
-  console.log(`📊 Server Stats - Connections: ${io.sockets.sockets.size}, Players: ${players.length}, Game Active: ${!gameOver}`);
-}, 30000);
+  const now = new Date();
+  const cutoff = 30 * 60 * 1000; // 30 minutes
+  
+  rooms.forEach((room, roomId) => {
+    if (now - room.lastActivity > cutoff) {
+      rooms.delete(roomId);
+      console.log(`Room ${roomId} auto-deleted - inactive`);
+    }
+  });
+}, 30 * 60 * 1000);
 
-// -------- Deck helpers --------
+// -------- Deck Functions --------
 function createDeck() {
   const colors = ["red", "green", "blue", "yellow"];
   const values = ["0","1","2","3","4","5","6","7","8","9","skip","reverse","draw2"];
@@ -419,6 +589,7 @@ function createDeck() {
   }
   return out;
 }
+
 function shuffleDeck(a) {
   for (let i = a.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1));
@@ -426,6 +597,7 @@ function shuffleDeck(a) {
   }
   return a;
 }
+
 function dealHands(playersList, deckArr) {
   const hands = {};
   playersList.forEach((p) => (hands[p.id] = deckArr.splice(0, 7)));

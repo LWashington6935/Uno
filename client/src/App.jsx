@@ -3,16 +3,12 @@ import React, { useState, useEffect, useMemo } from "react";
 import { io } from "socket.io-client";
 import "./App.css";
 
-// Socket.IO client - Fixed WebSocket configuration with fallbacks
 const socket = io(import.meta.env.VITE_SERVER_URL || "http://localhost:3001", {
-  transports: ["websocket", "polling"], // Add polling fallback for WebSocket issues
-  reconnectionAttempts: 10,             // Increase reconnection attempts
-  timeout: 20000,                       // Increase timeout to 20 seconds
-  forceNew: true,                       // Force new connection
+  transports: ["polling", "websocket"],
+  upgrade: true,
+  rememberUpgrade: false
 });
 
-// Remove exactly ONE instance of a played card from a hand.
-// For wild/draw4 we match by value only (ignore chosen color on the played card).
 function removeOneCard(hand = [], played) {
   let removed = false;
   return hand.filter((c) => {
@@ -30,10 +26,21 @@ function removeOneCard(hand = [], played) {
 }
 
 function App() {
+  // Connection state
   const [connected, setConnected] = useState(false);
   const [name, setName] = useState("");
-  const [nameSubmitted, setNameSubmitted] = useState(false);
-
+  
+  // App state flow: 'name' -> 'lobby' -> 'room' -> 'game'
+  const [appState, setAppState] = useState('name');
+  
+  // Room state
+  const [currentRoom, setCurrentRoom] = useState(null);
+  const [availableRooms, setAvailableRooms] = useState([]);
+  const [roomError, setRoomError] = useState('');
+  const [createRoomId, setCreateRoomId] = useState('');
+  const [joinRoomId, setJoinRoomId] = useState('');
+  
+  // Game state (same as before)
   const [players, setPlayers] = useState([]);
   const [hand, setHand] = useState([]);
   const [allHands, setAllHands] = useState({});
@@ -45,54 +52,64 @@ function App() {
   const [pendingWildCard, setPendingWildCard] = useState(null);
   const [colorMessage, setColorMessage] = useState("");
 
-  // UNO flow UI
-  const [unoPendingFor, setUnoPendingFor] = useState(null); // socket id who must press UNO now
-  const [unoBanner, setUnoBanner] = useState(null);         // { text, ok, playerId }
+  const [unoPendingFor, setUnoPendingFor] = useState(null);
+  const [unoBanner, setUnoBanner] = useState(null);
   const [unoPressed, setUnoPressed] = useState(false);
 
-  // Scoreboard / round summary / tournament winner
   const [scores, setScores] = useState({});
   const [targetScore, setTargetScore] = useState(500);
-  const [roundSummary, setRoundSummary] = useState(null);   // { winnerId, breakdown[], eliminatedIds[] }
-  const [winner, setWinner] = useState(null);               // { playerId, name }
+  const [roundSummary, setRoundSummary] = useState(null);
+  const [winner, setWinner] = useState(null);
 
-  // Connection status debugging
-  const [connectionStatus, setConnectionStatus] = useState("Connecting...");
-
-  // ---------- Socket wiring ----------
   useEffect(() => {
-    // Connection status handlers
+    // Connection events
     socket.on("connect", () => {
-      console.log("Connected to server:", socket.id);
+      console.log("Connected!");
       setConnected(true);
-      setConnectionStatus("Connected!");
     });
 
-    socket.on("disconnect", (reason) => {
-      console.log("Disconnected:", reason);
+    socket.on("disconnect", () => {
+      console.log("Disconnected");
       setConnected(false);
-      setConnectionStatus(`Disconnected: ${reason}`);
+      setAppState('name');
+      setCurrentRoom(null);
     });
 
-    socket.on("connect_error", (error) => {
-      console.error("Connection error:", error);
-      setConnectionStatus(`Connection failed: ${error.message}`);
+    // Room management events
+    socket.on("room-created", ({ roomId, room }) => {
+      setCurrentRoom(room);
+      setAppState('room');
+      setRoomError('');
     });
 
-    socket.on("reconnect", (attemptNumber) => {
-      console.log("Reconnected after", attemptNumber, "attempts");
-      setConnectionStatus("Reconnected!");
+    socket.on("room-joined", ({ roomId, room }) => {
+      setCurrentRoom(room);
+      setAppState('room');
+      setRoomError('');
     });
 
-    socket.on("reconnect_error", (error) => {
-      console.error("Reconnection error:", error);
-      setConnectionStatus("Reconnection failed");
+    socket.on("room-updated", (room) => {
+      setCurrentRoom(room);
+      setPlayers(room.players);
     });
 
-    // Game event handlers
-    socket.on("update-players", setPlayers);
-    socket.on("invalid-play", ({ message }) => alert(message));
+    socket.on("room-left", () => {
+      setCurrentRoom(null);
+      setAppState('lobby');
+      setGameStarted(false);
+      setWinner(null);
+      setRoundSummary(null);
+    });
 
+    socket.on("room-error", ({ message }) => {
+      setRoomError(message);
+    });
+
+    socket.on("rooms-list", (rooms) => {
+      setAvailableRooms(rooms);
+    });
+
+    // Game events (same as before)
     socket.on("game-started", ({ hands, topCard: initialTop, currentPlayerId, scores: sc, targetScore: ts }) => {
       setGameStarted(true);
       setHand(hands[socket.id] || []);
@@ -123,16 +140,13 @@ function App() {
         setColorMessage("");
       }
 
-      // Update counts for *all* hands (remove exactly ONE matching card)
       setAllHands(prev => {
         const updated = { ...prev };
         if (updated[playerId]) updated[playerId] = removeOneCard(updated[playerId], card);
         return updated;
       });
 
-      // Update *my* hand removal (remove exactly ONE)
       if (playerId === socket.id) setHand(prev => removeOneCard(prev, card));
-
       setPendingWildCard(null);
     });
 
@@ -150,7 +164,6 @@ function App() {
       setPendingWildCard(null);
     });
 
-    // --- UNO flow ---
     socket.on("uno-window", ({ playerId }) => {
       setUnoPendingFor(playerId);
     });
@@ -167,38 +180,39 @@ function App() {
       setTimeout(() => setUnoBanner(null), 3000);
     });
 
-    // Round summary + scores
     socket.on("round-ended", ({ winnerId, scores: sc, breakdown, eliminatedIds, targetScore: ts }) => {
       setScores(sc || {});
       setTargetScore(ts || 500);
       setRoundSummary({ winnerId, breakdown, eliminatedIds });
     });
 
-    // Tournament winner
     socket.on("tournament-won", ({ championId, championName, scores: sc }) => {
       setScores(sc || {});
       setWinner({ playerId: championId, name: championName || "Winner" });
       setUnoPendingFor(null);
     });
 
-    // Optional live score updates / hand mirrors
     socket.on("scores-updated", ({ scores: sc, targetScore: ts }) => {
       if (sc) setScores(sc);
       if (ts) setTargetScore(ts);
     });
+
     socket.on("update-hands", (hands) => {
       setAllHands(hands);
       setHand(hands[socket.id] || []);
     });
 
+    socket.on("invalid-play", ({ message }) => alert(message));
+
     return () => {
       socket.off("connect");
       socket.off("disconnect");
-      socket.off("connect_error");
-      socket.off("reconnect");
-      socket.off("reconnect_error");
-      socket.off("update-players");
-      socket.off("invalid-play");
+      socket.off("room-created");
+      socket.off("room-joined");
+      socket.off("room-updated");
+      socket.off("room-left");
+      socket.off("room-error");
+      socket.off("rooms-list");
       socket.off("game-started");
       socket.off("card-played");
       socket.off("card-drawn");
@@ -209,17 +223,49 @@ function App() {
       socket.off("tournament-won");
       socket.off("scores-updated");
       socket.off("update-hands");
+      socket.off("invalid-play");
     };
   }, [players]);
 
-  // ---------- Helpers ----------
+  // Refresh room list when in lobby
+  useEffect(() => {
+    if (appState === 'lobby') {
+      socket.emit("get-rooms");
+      const interval = setInterval(() => {
+        socket.emit("get-rooms");
+      }, 5000);
+      return () => clearInterval(interval);
+    }
+  }, [appState]);
+
+  // Event handlers
   const handleNameSubmit = (e) => {
     e.preventDefault();
     if (!name.trim()) return;
-    socket.emit("new-player", name.trim());
-    setNameSubmitted(true);
+    setAppState('lobby');
   };
 
+  const handleCreateRoom = (e) => {
+    e.preventDefault();
+    socket.emit("create-room", { 
+      roomId: createRoomId.trim() || undefined, 
+      playerName: name 
+    });
+  };
+
+  const handleJoinRoom = (roomId) => {
+    socket.emit("join-room", { roomId, playerName: name });
+  };
+
+  const handleLeaveRoom = () => {
+    socket.emit("leave-room");
+  };
+
+  const handleStartGame = () => {
+    socket.emit("start-game");
+  };
+
+  // Game handlers (same as before)
   const hasPlayableCard = () =>
     hand.some(
       (c) =>
@@ -296,7 +342,7 @@ function App() {
     setPendingWildCard(null);
   };
 
-  // Seat mapping relative to the local player
+  // Player positioning
   const positions = ["player-bottom", "player-top", "player-right", "player-left"];
   const orderedPlayers = useMemo(() => {
     const idx = players.findIndex((p) => p.id === socket.id);
@@ -305,10 +351,11 @@ function App() {
   }, [players]);
 
   const myUnoActive = unoPendingFor === socket.id && hand.length === 1;
+  const isHost = currentRoom?.host === socket.id;
 
+  // Render different screens based on app state
   return (
     <div className="container">
-      {/* Small inline styles for UNO button / banners / winner / round summary / scoreboard */}
       <style>{`
         .uno-btn {
           background:#ffdf00; color:#000; border:none; border-radius:999px;
@@ -322,8 +369,7 @@ function App() {
         .uno-banner {
           position:absolute; top:12%; left:50%; transform:translateX(-50%);
           font-size:48px; font-weight:900; padding:.4rem 1rem; border-radius:10px;
-          background:rgba(0,0,0,.55);
-          z-index: 1600;
+          background:rgba(0,0,0,.55); z-index: 1600;
         }
         .uno-banner.ok { color:#00ff95; text-shadow:0 0 16px rgba(0,255,149,.8); }
         .uno-banner.fail { color:#ff6262; text-shadow:0 0 16px rgba(255,98,98,.8); }
@@ -344,48 +390,173 @@ function App() {
         }
         .scoreboard .title { font-weight:700; margin-bottom:4px; }
 
-        .connection-status {
+        .room-info {
           position:absolute; top:8px; right:8px;
           background:rgba(0,0,0,.35); padding:8px 12px; border-radius:8px; z-index:1400;
-          font-size:12px; color: ${connected ? '#00ff95' : '#ff6262'};
+          font-size:14px; text-align:right;
+        }
+
+        .lobby-container {
+          display: flex; flex-direction: column; align-items: center; gap: 2rem;
+          max-width: 800px; margin: 0 auto; padding: 2rem;
+        }
+        .rooms-grid {
+          display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+          gap: 1rem; width: 100%;
+        }
+        .room-card {
+          background: rgba(255,255,255,0.1); padding: 1rem; border-radius: 8px;
+          border: 2px solid transparent; cursor: pointer; transition: all 0.2s;
+        }
+        .room-card:hover {
+          border-color: rgba(255,255,255,0.3); background: rgba(255,255,255,0.15);
+        }
+        .room-lobby {
+          display: flex; flex-direction: column; align-items: center; gap: 1rem;
+          max-width: 600px; margin: 0 auto; padding: 2rem;
         }
       `}</style>
 
-      {/* Connection status indicator */}
-      <div className="connection-status">
-        {connectionStatus}
-      </div>
+      {!connected && <h2>Connecting...</h2>}
 
-      {!connected && <h2>{connectionStatus}</h2>}
-
-      {connected && !nameSubmitted && (
-        <form onSubmit={handleNameSubmit}>
-          <h2>Enter Name</h2>
-          <input
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            placeholder="Your Name"
-          />
-          <button className="button">Join</button>
+      {/* Name Entry Screen */}
+      {connected && appState === 'name' && (
+        <form onSubmit={handleNameSubmit} className="lobby-container">
+          <h1>UNO Tournament</h1>
+          <div>
+            <input
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="Enter Your Name"
+              style={{ padding: '12px', fontSize: '16px', marginRight: '10px', borderRadius: '5px', border: 'none' }}
+            />
+            <button className="button" type="submit">Continue</button>
+          </div>
         </form>
       )}
 
-      {connected && nameSubmitted && !gameStarted && !winner && (
-        <div>
-          <h2>Lobby</h2>
-          <ul>
-            {players.map((p) => (
-              <li key={p.id}>{p.name}</li>
-            ))}
-          </ul>
-          <button className="button" onClick={() => socket.emit("start-game")}>
-            Start Game
-          </button>
+      {/* Room Lobby Screen */}
+      {connected && appState === 'lobby' && (
+        <div className="lobby-container">
+          <h1>UNO Rooms</h1>
+          <p>Welcome, {name}!</p>
+
+          {/* Create Room */}
+          <div style={{ background: 'rgba(0,0,0,0.3)', padding: '1.5rem', borderRadius: '10px', width: '100%', maxWidth: '400px' }}>
+            <h3>Create New Room</h3>
+            <form onSubmit={handleCreateRoom} style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+              <input
+                value={createRoomId}
+                onChange={(e) => setCreateRoomId(e.target.value.toUpperCase())}
+                placeholder="Custom Room ID (optional)"
+                maxLength={6}
+                style={{ padding: '10px', borderRadius: '5px', border: 'none' }}
+              />
+              <button className="button" type="submit">Create Room</button>
+            </form>
+          </div>
+
+          {/* Available Rooms */}
+          <div style={{ width: '100%' }}>
+            <h3>Available Rooms ({availableRooms.length})</h3>
+            {availableRooms.length === 0 ? (
+              <p style={{ textAlign: 'center', opacity: 0.7 }}>No rooms available. Create one!</p>
+            ) : (
+              <div className="rooms-grid">
+                {availableRooms.map((room) => (
+                  <div
+                    key={room.id}
+                    className="room-card"
+                    onClick={() => handleJoinRoom(room.id)}
+                  >
+                    <div style={{ fontWeight: 'bold', fontSize: '18px' }}>{room.id}</div>
+                    <div>Host: {room.host}</div>
+                    <div>Players: {room.playerCount}/{room.maxPlayers}</div>
+                    <div style={{ fontSize: '12px', opacity: 0.7 }}>
+                      Created: {new Date(room.created).toLocaleTimeString()}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Join by ID */}
+          <div style={{ background: 'rgba(0,0,0,0.3)', padding: '1.5rem', borderRadius: '10px', width: '100%', maxWidth: '400px' }}>
+            <h3>Join by Room ID</h3>
+            <div style={{ display: 'flex', gap: '10px' }}>
+              <input
+                value={joinRoomId}
+                onChange={(e) => setJoinRoomId(e.target.value.toUpperCase())}
+                placeholder="Enter Room ID"
+                maxLength={6}
+                style={{ padding: '10px', borderRadius: '5px', border: 'none', flex: 1 }}
+              />
+              <button 
+                className="button" 
+                onClick={() => handleJoinRoom(joinRoomId)}
+                disabled={!joinRoomId.trim()}
+              >
+                Join
+              </button>
+            </div>
+          </div>
+
+          {roomError && (
+            <div style={{ color: '#ff6262', textAlign: 'center', fontWeight: 'bold' }}>
+              {roomError}
+            </div>
+          )}
         </div>
       )}
 
-      {gameStarted && (
+      {/* Room Waiting Screen */}
+      {connected && appState === 'room' && !gameStarted && !winner && (
+        <div className="room-lobby">
+          <h2>Room: {currentRoom?.id}</h2>
+          <p>Status: {currentRoom?.status === 'waiting' ? 'Waiting for players' : 'Game in progress'}</p>
+          
+          <div style={{ background: 'rgba(0,0,0,0.3)', padding: '1rem', borderRadius: '8px', minWidth: '300px' }}>
+            <h3>Players ({players.length}/{currentRoom?.maxPlayers})</h3>
+            <ul style={{ listStyle: 'none', padding: 0 }}>
+              {players.map((p) => (
+                <li key={p.id} style={{ padding: '5px 0' }}>
+                  {p.name} {p.id === currentRoom?.host && '(Host)'} {p.id === socket.id && '(You)'}
+                </li>
+              ))}
+            </ul>
+          </div>
+
+          <div style={{ display: 'flex', gap: '10px' }}>
+            {isHost && (
+              <button 
+                className="button" 
+                onClick={handleStartGame}
+                disabled={players.length < 2}
+              >
+                Start Game
+              </button>
+            )}
+            <button 
+              className="button" 
+              onClick={handleLeaveRoom}
+              style={{ background: '#666' }}
+            >
+              Leave Room
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Game Screen */}
+      {gameStarted && currentRoom && (
         <div className="game-area">
+          {/* Room info */}
+          <div className="room-info">
+            <div>Room: {currentRoom.id}</div>
+            <div>Players: {players.length}</div>
+          </div>
+
           {/* Scoreboard */}
           <div className="scoreboard">
             <div className="title">Scores (to {targetScore})</div>
@@ -396,14 +567,12 @@ function App() {
 
           {colorMessage && <div className="color-message">{colorMessage}</div>}
 
-          {/* UNO banners (auto hides in 3s) */}
           {unoBanner && (
             <div className={`uno-banner ${unoBanner.ok ? "ok" : "fail"}`}>
               {unoBanner.text}
             </div>
           )}
 
-          {/* Round summary (shown between rounds) */}
           {roundSummary && (
             <div className="overlay">
               <div className="box">
@@ -426,16 +595,19 @@ function App() {
             </div>
           )}
 
-          {/* Tournament winner overlay */}
           {winner && (
             <div className="overlay">
               <div className="box" style={{ fontSize: 34 }}>
                 {winner.name} wins the tournament!
+                <div style={{ fontSize: 18, marginTop: 10 }}>
+                  <button className="button" onClick={handleLeaveRoom}>
+                    Leave Room
+                  </button>
+                </div>
               </div>
             </div>
           )}
 
-          {/* Piles */}
           <div className="piles">
             <div
               className={`draw-pile${currentPlayerId !== socket.id || hasPlayableCard() ? " disabled" : ""}`}
@@ -455,7 +627,6 @@ function App() {
             </div>
           </div>
 
-          {/* Players around the table */}
           {orderedPlayers.map((player, i) => {
             const pos = positions[i] || "player-bottom";
             const count = allHands[player.id]?.length || 0;
@@ -471,7 +642,6 @@ function App() {
             );
           })}
 
-          {/* Wild / Draw4 color picker */}
           {pendingWildCard && (
             <div className="color-picker">
               <h3>Choose Color</h3>
@@ -487,7 +657,6 @@ function App() {
             </div>
           )}
 
-          {/* UNO button (only active while you're the pending UNO player and you have 1 card) */}
           <div style={{ position: "absolute", bottom: 12, right: 12 }}>
             <button
               className="uno-btn"
