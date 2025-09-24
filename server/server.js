@@ -7,62 +7,43 @@ const cors = require("cors");
 const app = express();
 app.use(cors());
 
+// Create HTTP server
 const server = http.createServer(app);
 
-// Enhanced CORS configuration for WebSocket connections
+// Simple Socket.IO setup
 const io = new Server(server, {
-  cors: { 
-    origin: [
-      "http://localhost:5173", 
-      "http://localhost:3000",
-      "https://unogame-eta.vercel.app",  // Your exact Vercel URL
-      process.env.CLIENT_URL || "https://yourgame.vercel.app"
-    ], 
-    methods: ["GET", "POST"],
-    credentials: true,
-    allowedHeaders: ["Content-Type"]
+  cors: {
+    origin: "*",
+    methods: ["GET", "POST"]
   },
-  transports: ['websocket', 'polling'],  // Enable both transports
-  allowEIO3: true                        // Enable Engine.IO v3 compatibility
+  transports: ['polling', 'websocket'],
+  allowEIO3: true
 });
 
-// Health check endpoint to prevent server sleep
-app.get('/health', (req, res) => {
-  res.json({ 
-    status: 'OK', 
-    timestamp: new Date(),
-    uptime: process.uptime(),
-    connections: io.sockets.sockets.size
-  });
-});
-
-// Basic route
+// Basic routes
 app.get('/', (req, res) => {
-  res.json({ 
-    message: 'UNO Game Server is running!',
-    socketConnections: io.sockets.sockets.size,
-    timestamp: new Date()
-  });
+  res.json({ message: 'UNO Server Running', time: new Date() });
 });
 
-// -------- Game / Tournament State --------
-let players = [];          // [{ id, name }]
-let deck = [];             // array of { color, value }
-let handsById = {};        // { socketId: [cards] }
-let topCard = null;        // current top of discard pile
-let currentTurnIndex = 0;  // index into players[]
-let direction = 1;         // +1 forward, -1 reverse
+app.get('/health', (req, res) => {
+  res.json({ status: 'OK', connections: io.sockets.sockets.size });
+});
 
-let unoPendingFor = null;  // socket id who must call UNO
-let gameOver = false;      // tournament finished?
-
-// Tournament scoring
-let scores = {};           // cumulative penalty points: { socketId: number }
-let targetScore = 500;     // eliminate at or above this threshold
+// -------- Game State --------
+let players = [];
+let deck = [];
+let handsById = {};
+let topCard = null;
+let currentTurnIndex = 0;
+let direction = 1;
+let unoPendingFor = null;
+let gameOver = false;
+let scores = {};
+let targetScore = 500;
 
 const mod = (n, m) => ((n % m) + m) % m;
 
-// -------- Helpers --------
+// -------- Helper Functions --------
 function isPlayable(card, top) {
   return (
     card.color === top.color ||
@@ -71,9 +52,11 @@ function isPlayable(card, top) {
     card.value === "draw4"
   );
 }
+
 function hasColorInHand(hand, color) {
   return hand.some((c) => c.color === color);
 }
+
 function giveCards(playerId, n) {
   const drawn = deck.splice(0, n);
   drawn.forEach((d) => {
@@ -81,45 +64,39 @@ function giveCards(playerId, n) {
     io.to(playerId).emit("card-drawn", d);
   });
 }
+
 function advanceTurn(steps = 1) {
   if (players.length === 0) return;
   currentTurnIndex = mod(currentTurnIndex + steps * direction, players.length);
 }
 
-// Card values for scoring
 function cardPoints(c) {
   if (c.value === "wild" || c.value === "draw4") return 50;
   if (c.value === "skip" || c.value === "reverse" || c.value === "draw2") return 20;
   const n = Number(c.value);
   return Number.isFinite(n) ? n : 0;
 }
+
 function handPoints(hand = []) {
   return hand.reduce((sum, c) => sum + cardPoints(c), 0);
 }
 
-// Get a valid starting card (no wilds or draw4s)
 function getValidStartCard(deckArray) {
   let cardIndex = 0;
   while (cardIndex < deckArray.length) {
     const card = deckArray[cardIndex];
     if (card.value !== "wild" && card.value !== "draw4") {
-      // Remove this card from deck and return it
       return deckArray.splice(cardIndex, 1)[0];
     }
     cardIndex++;
   }
-  // Fallback - shouldn't happen with a proper deck
   return deckArray.shift();
 }
 
-// Start a *round* with current players (scores persist)
 function startRound() {
   deck = shuffleDeck(createDeck());
   handsById = dealHands(players, deck);
-  
-  // Get a valid starting card (no wilds or draw4s)
   topCard = getValidStartCard(deck);
-  
   currentTurnIndex = 0;
   direction = 1;
   unoPendingFor = null;
@@ -128,22 +105,19 @@ function startRound() {
     hands: handsById,
     topCard,
     currentPlayerId: players[currentTurnIndex]?.id || null,
-    scores,                 // NEW: send cumulative scores
-    targetScore,            // for UI display
-    playerOrder: players,   // keep client aligned if needed
+    scores,
+    targetScore,
+    playerOrder: players,
   });
 }
 
-// End a *round* (somebody went out): score others, update totals, eliminate, continue or end.
 function endRound(winnerId) {
-  // Build scoring breakdown
   const breakdown = players.map((p) => {
     const added = p.id === winnerId ? 0 : handPoints(handsById[p.id] || []);
     scores[p.id] = (scores[p.id] || 0) + added;
     return { playerId: p.id, name: p.name, added, total: scores[p.id] };
   });
 
-  // Eliminations
   const eliminatedIds = [];
   players = players.filter((p) => {
     if ((scores[p.id] || 0) >= targetScore) {
@@ -154,12 +128,10 @@ function endRound(winnerId) {
     return true;
   });
 
-  // Adjust currentTurnIndex into new players list
   currentTurnIndex = 0;
   direction = 1;
   unoPendingFor = null;
 
-  // Tournament winner?
   if (players.length <= 1) {
     gameOver = true;
     const champion = players[0] || null;
@@ -174,7 +146,6 @@ function endRound(winnerId) {
     return;
   }
 
-  // Inform clients and auto-start next round after a short delay
   io.emit("round-ended", {
     winnerId,
     scores,
@@ -194,13 +165,12 @@ function settlePendingUnoBeforeAction() {
   io.emit("uno-result", { playerId: offender, ok: false, penalty: 2 });
 }
 
-// -------- Socket.IO with Enhanced Debugging --------
+// -------- Socket Events --------
 io.on("connection", (socket) => {
-  console.log(`✅ Client connected: ${socket.id} (Total: ${io.sockets.sockets.size})`);
-  
-  socket.on("disconnect", (reason) => {
-    console.log(`❌ Client disconnected: ${socket.id} - Reason: ${reason} (Remaining: ${io.sockets.sockets.size - 1})`);
-    
+  console.log("Client connected:", socket.id);
+
+  socket.on("disconnect", () => {
+    console.log("Client disconnected:", socket.id);
     const leavingIndex = players.findIndex((p) => p.id === socket.id);
     players = players.filter((p) => p.id !== socket.id);
     delete handsById[socket.id];
@@ -216,13 +186,8 @@ io.on("connection", (socket) => {
     io.emit("update-hands", handsById);
   });
 
-  socket.on("error", (error) => {
-    console.error(`🔥 Socket error for ${socket.id}:`, error);
-  });
-
   socket.on("new-player", (username) => {
     if (gameOver) return;
-    console.log(`👤 New player joined: ${username} (${socket.id})`);
     players.push({ id: socket.id, name: username });
     scores[socket.id] = scores[socket.id] || 0;
     io.emit("update-players", players);
@@ -230,47 +195,39 @@ io.on("connection", (socket) => {
 
   socket.on("start-game", () => {
     if (players.length === 0) return;
-    console.log(`🎮 Game started with ${players.length} players`);
-    // Fresh tournament: reset scores and flags
     scores = {};
     players.forEach((p) => (scores[p.id] = 0));
     gameOver = false;
     startRound();
   });
 
-  // Optional: host could change target score
   socket.on("set-target-score", (val) => {
     const allowed = [100, 200, 300, 400, 500, 1000];
     if (allowed.includes(Number(val))) {
       targetScore = Number(val);
-      console.log(`🎯 Target score changed to: ${targetScore}`);
       io.emit("scores-updated", { scores, targetScore });
     }
   });
 
-  // Declare UNO (button)
   socket.on("declare-uno", () => {
     if (gameOver) return;
     const me = socket.id;
     const myCount = (handsById[me] || []).length;
     if (unoPendingFor === me && myCount === 1) {
       unoPendingFor = null;
-      console.log(`🎯 ${socket.id} successfully declared UNO!`);
       io.emit("uno-result", { playerId: me, ok: true, penalty: 0 });
     } else {
       socket.emit("invalid-play", { message: "UNO not required or wrong timing." });
     }
   });
 
-  // Play a card
   socket.on("play-card", ({ card, unoDeclared = false }) => {
     if (gameOver) return;
-
     settlePendingUnoBeforeAction();
 
     const me = socket.id;
     const myIdx = players.findIndex((p) => p.id === me);
-    if (myIdx !== currentTurnIndex) return; // not your turn
+    if (myIdx !== currentTurnIndex) return;
 
     if (card.value === "draw4" && hasColorInHand(handsById[me] || [], topCard.color)) {
       return socket.emit("invalid-play", {
@@ -282,29 +239,21 @@ io.on("connection", (socket) => {
       return socket.emit("invalid-play", { message: "Invalid card play." });
     }
 
-    // Remove exactly ONE copy of the played card
     function sameCard(a, b) {
       if (b.value === "wild" || b.value === "draw4") return a.value === b.value;
       return a.color === b.color && a.value === b.value;
     }
     
-    // FIXED: Remove only the FIRST matching card, not all matches
     const myHand = handsById[me] || [];
     const cardIndex = myHand.findIndex(c => sameCard(c, card));
     if (cardIndex !== -1) {
       handsById[me].splice(cardIndex, 1);
     }
 
-    console.log(`🃏 ${socket.id} played ${card.color} ${card.value}`);
-
     topCard = card;
-
-    // Round end or UNO window
     const remaining = (handsById[me]?.length ?? 0);
 
     if (remaining === 0) {
-      console.log(`🏆 ${socket.id} won the round!`);
-      // Round ends immediately – score others, then new round or tournament end
       io.emit("update-hands", handsById);
       io.emit("card-played", { card, playerId: me, nextPlayerId: null, topCard });
       endRound(me);
@@ -317,14 +266,12 @@ io.on("connection", (socket) => {
         io.emit("uno-result", { playerId: me, ok: true, penalty: 0 });
       } else if (unoPendingFor !== me) {
         unoPendingFor = me;
-        console.log(`⚠️ ${socket.id} has 1 card but didn't declare UNO!`);
         io.emit("uno-window", { playerId: me });
       }
     } else {
       if (unoPendingFor === me) unoPendingFor = null;
     }
 
-    // Action cards / advance
     switch (card.value) {
       case "skip":
         advanceTurn(2);
@@ -360,10 +307,8 @@ io.on("connection", (socket) => {
     io.emit("update-hands", handsById);
   });
 
-  // Draw a card (no playable card)
   socket.on("draw-card", () => {
     if (gameOver) return;
-
     settlePendingUnoBeforeAction();
 
     const me = socket.id;
@@ -376,8 +321,6 @@ io.on("connection", (socket) => {
     (handsById[me] ||= []).push(drawn);
     socket.emit("card-drawn", drawn);
 
-    console.log(`📥 ${socket.id} drew a card`);
-
     const canPlayDrawn =
       isPlayable(drawn, topCard) &&
       !(drawn.value === "draw4" && hasColorInHand(handsById[me], topCard.color));
@@ -389,20 +332,13 @@ io.on("connection", (socket) => {
   });
 });
 
-// -------- Boot --------
+// -------- Start Server --------
 const PORT = process.env.PORT || 3001;
 server.listen(PORT, () => {
-  console.log(`🚀 UNO Server running on port ${PORT}`);
-  console.log(`📍 Server URL: ${process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`}`);
-  console.log(`🌐 Client URL: ${process.env.CLIENT_URL || 'http://localhost:5173'}`);
+  console.log(`Server running on port ${PORT}`);
 });
 
-// Log server stats every 30 seconds
-setInterval(() => {
-  console.log(`📊 Server Stats - Connections: ${io.sockets.sockets.size}, Players: ${players.length}, Game Active: ${!gameOver}`);
-}, 30000);
-
-// -------- Deck helpers --------
+// -------- Deck Functions --------
 function createDeck() {
   const colors = ["red", "green", "blue", "yellow"];
   const values = ["0","1","2","3","4","5","6","7","8","9","skip","reverse","draw2"];
@@ -419,6 +355,7 @@ function createDeck() {
   }
   return out;
 }
+
 function shuffleDeck(a) {
   for (let i = a.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1));
@@ -426,6 +363,7 @@ function shuffleDeck(a) {
   }
   return a;
 }
+
 function dealHands(playersList, deckArr) {
   const hands = {};
   playersList.forEach((p) => (hands[p.id] = deckArr.splice(0, 7)));

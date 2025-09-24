@@ -3,16 +3,13 @@ import React, { useState, useEffect, useMemo } from "react";
 import { io } from "socket.io-client";
 import "./App.css";
 
-// Socket.IO client - Fixed WebSocket configuration with fallbacks
+// Simple Socket.IO connection
 const socket = io(import.meta.env.VITE_SERVER_URL || "http://localhost:3001", {
-  transports: ["websocket", "polling"], // Add polling fallback for WebSocket issues
-  reconnectionAttempts: 10,             // Increase reconnection attempts
-  timeout: 20000,                       // Increase timeout to 20 seconds
-  forceNew: true,                       // Force new connection
+  transports: ["polling", "websocket"],
+  upgrade: true,
+  rememberUpgrade: false
 });
 
-// Remove exactly ONE instance of a played card from a hand.
-// For wild/draw4 we match by value only (ignore chosen color on the played card).
 function removeOneCard(hand = [], played) {
   let removed = false;
   return hand.filter((c) => {
@@ -45,51 +42,26 @@ function App() {
   const [pendingWildCard, setPendingWildCard] = useState(null);
   const [colorMessage, setColorMessage] = useState("");
 
-  // UNO flow UI
-  const [unoPendingFor, setUnoPendingFor] = useState(null); // socket id who must press UNO now
-  const [unoBanner, setUnoBanner] = useState(null);         // { text, ok, playerId }
+  const [unoPendingFor, setUnoPendingFor] = useState(null);
+  const [unoBanner, setUnoBanner] = useState(null);
   const [unoPressed, setUnoPressed] = useState(false);
 
-  // Scoreboard / round summary / tournament winner
   const [scores, setScores] = useState({});
   const [targetScore, setTargetScore] = useState(500);
-  const [roundSummary, setRoundSummary] = useState(null);   // { winnerId, breakdown[], eliminatedIds[] }
-  const [winner, setWinner] = useState(null);               // { playerId, name }
+  const [roundSummary, setRoundSummary] = useState(null);
+  const [winner, setWinner] = useState(null);
 
-  // Connection status debugging
-  const [connectionStatus, setConnectionStatus] = useState("Connecting...");
-
-  // ---------- Socket wiring ----------
   useEffect(() => {
-    // Connection status handlers
     socket.on("connect", () => {
-      console.log("Connected to server:", socket.id);
+      console.log("Connected!");
       setConnected(true);
-      setConnectionStatus("Connected!");
     });
 
-    socket.on("disconnect", (reason) => {
-      console.log("Disconnected:", reason);
+    socket.on("disconnect", () => {
+      console.log("Disconnected");
       setConnected(false);
-      setConnectionStatus(`Disconnected: ${reason}`);
     });
 
-    socket.on("connect_error", (error) => {
-      console.error("Connection error:", error);
-      setConnectionStatus(`Connection failed: ${error.message}`);
-    });
-
-    socket.on("reconnect", (attemptNumber) => {
-      console.log("Reconnected after", attemptNumber, "attempts");
-      setConnectionStatus("Reconnected!");
-    });
-
-    socket.on("reconnect_error", (error) => {
-      console.error("Reconnection error:", error);
-      setConnectionStatus("Reconnection failed");
-    });
-
-    // Game event handlers
     socket.on("update-players", setPlayers);
     socket.on("invalid-play", ({ message }) => alert(message));
 
@@ -123,16 +95,13 @@ function App() {
         setColorMessage("");
       }
 
-      // Update counts for *all* hands (remove exactly ONE matching card)
       setAllHands(prev => {
         const updated = { ...prev };
         if (updated[playerId]) updated[playerId] = removeOneCard(updated[playerId], card);
         return updated;
       });
 
-      // Update *my* hand removal (remove exactly ONE)
       if (playerId === socket.id) setHand(prev => removeOneCard(prev, card));
-
       setPendingWildCard(null);
     });
 
@@ -150,7 +119,6 @@ function App() {
       setPendingWildCard(null);
     });
 
-    // --- UNO flow ---
     socket.on("uno-window", ({ playerId }) => {
       setUnoPendingFor(playerId);
     });
@@ -167,25 +135,23 @@ function App() {
       setTimeout(() => setUnoBanner(null), 3000);
     });
 
-    // Round summary + scores
     socket.on("round-ended", ({ winnerId, scores: sc, breakdown, eliminatedIds, targetScore: ts }) => {
       setScores(sc || {});
       setTargetScore(ts || 500);
       setRoundSummary({ winnerId, breakdown, eliminatedIds });
     });
 
-    // Tournament winner
     socket.on("tournament-won", ({ championId, championName, scores: sc }) => {
       setScores(sc || {});
       setWinner({ playerId: championId, name: championName || "Winner" });
       setUnoPendingFor(null);
     });
 
-    // Optional live score updates / hand mirrors
     socket.on("scores-updated", ({ scores: sc, targetScore: ts }) => {
       if (sc) setScores(sc);
       if (ts) setTargetScore(ts);
     });
+
     socket.on("update-hands", (hands) => {
       setAllHands(hands);
       setHand(hands[socket.id] || []);
@@ -194,9 +160,6 @@ function App() {
     return () => {
       socket.off("connect");
       socket.off("disconnect");
-      socket.off("connect_error");
-      socket.off("reconnect");
-      socket.off("reconnect_error");
       socket.off("update-players");
       socket.off("invalid-play");
       socket.off("game-started");
@@ -212,7 +175,6 @@ function App() {
     };
   }, [players]);
 
-  // ---------- Helpers ----------
   const handleNameSubmit = (e) => {
     e.preventDefault();
     if (!name.trim()) return;
@@ -296,7 +258,6 @@ function App() {
     setPendingWildCard(null);
   };
 
-  // Seat mapping relative to the local player
   const positions = ["player-bottom", "player-top", "player-right", "player-left"];
   const orderedPlayers = useMemo(() => {
     const idx = players.findIndex((p) => p.id === socket.id);
@@ -308,7 +269,6 @@ function App() {
 
   return (
     <div className="container">
-      {/* Small inline styles for UNO button / banners / winner / round summary / scoreboard */}
       <style>{`
         .uno-btn {
           background:#ffdf00; color:#000; border:none; border-radius:999px;
@@ -343,20 +303,9 @@ function App() {
           font-size:14px;
         }
         .scoreboard .title { font-weight:700; margin-bottom:4px; }
-
-        .connection-status {
-          position:absolute; top:8px; right:8px;
-          background:rgba(0,0,0,.35); padding:8px 12px; border-radius:8px; z-index:1400;
-          font-size:12px; color: ${connected ? '#00ff95' : '#ff6262'};
-        }
       `}</style>
 
-      {/* Connection status indicator */}
-      <div className="connection-status">
-        {connectionStatus}
-      </div>
-
-      {!connected && <h2>{connectionStatus}</h2>}
+      {!connected && <h2>Connecting...</h2>}
 
       {connected && !nameSubmitted && (
         <form onSubmit={handleNameSubmit}>
@@ -386,7 +335,6 @@ function App() {
 
       {gameStarted && (
         <div className="game-area">
-          {/* Scoreboard */}
           <div className="scoreboard">
             <div className="title">Scores (to {targetScore})</div>
             {players.map(p => (
@@ -396,14 +344,12 @@ function App() {
 
           {colorMessage && <div className="color-message">{colorMessage}</div>}
 
-          {/* UNO banners (auto hides in 3s) */}
           {unoBanner && (
             <div className={`uno-banner ${unoBanner.ok ? "ok" : "fail"}`}>
               {unoBanner.text}
             </div>
           )}
 
-          {/* Round summary (shown between rounds) */}
           {roundSummary && (
             <div className="overlay">
               <div className="box">
@@ -426,7 +372,6 @@ function App() {
             </div>
           )}
 
-          {/* Tournament winner overlay */}
           {winner && (
             <div className="overlay">
               <div className="box" style={{ fontSize: 34 }}>
@@ -435,7 +380,6 @@ function App() {
             </div>
           )}
 
-          {/* Piles */}
           <div className="piles">
             <div
               className={`draw-pile${currentPlayerId !== socket.id || hasPlayableCard() ? " disabled" : ""}`}
@@ -455,7 +399,6 @@ function App() {
             </div>
           </div>
 
-          {/* Players around the table */}
           {orderedPlayers.map((player, i) => {
             const pos = positions[i] || "player-bottom";
             const count = allHands[player.id]?.length || 0;
@@ -471,7 +414,6 @@ function App() {
             );
           })}
 
-          {/* Wild / Draw4 color picker */}
           {pendingWildCard && (
             <div className="color-picker">
               <h3>Choose Color</h3>
@@ -487,7 +429,6 @@ function App() {
             </div>
           )}
 
-          {/* UNO button (only active while you're the pending UNO player and you have 1 card) */}
           <div style={{ position: "absolute", bottom: 12, right: 12 }}>
             <button
               className="uno-btn"
