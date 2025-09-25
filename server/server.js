@@ -5,15 +5,34 @@ const { Server } = require("socket.io");
 const cors = require("cors");
 
 const app = express();
-app.use(cors());
+
+// Updated CORS configuration for Express
+app.use(cors({
+  origin: [
+    "https://uno-woad.vercel.app",
+    "http://localhost:3000",
+    "http://localhost:5173",  // Vite dev server
+    "http://localhost:3001"
+  ],
+  methods: ["GET", "POST"],
+  credentials: true
+}));
 
 const server = http.createServer(app);
+
+// Updated Socket.IO CORS configuration
 const io = new Server(server, {
   cors: {
-    origin: "*",
-    methods: ["GET", "POST"]
+    origin: [
+      "https://uno-woad.vercel.app",
+      "http://localhost:3000", 
+      "http://localhost:5173",  // Vite dev server
+      "http://localhost:3001"
+    ],
+    methods: ["GET", "POST"],
+    credentials: true
   },
-  transports: ['polling', 'websocket'],
+  transports: ['websocket', 'polling'], // Try websocket first
   allowEIO3: true
 });
 
