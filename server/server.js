@@ -6,15 +6,17 @@ const cors = require("cors");
 
 const app = express();
 
-// Updated CORS configuration for Express
+// Updated CORS configuration for all Vercel deployment patterns
 app.use(cors({
   origin: [
-    "https://unogame-eta.vercel.app",         // Your ACTUAL Vercel frontend URL
-    "https://uno-woad.vercel.app",           // Keep the old one just in case
-    "http://localhost:3000",                 // Local development
-    "http://localhost:5173",                 // Vite dev server
-    "http://localhost:3001",                 // Local backend
-    "https://uno-game-server-saq7.onrender.com"  // Your Render backend
+    "https://unogame-eta.vercel.app",                    // Production
+    "https://unogame-git-main-lucas-washingtons-projects.vercel.app", // Git branch
+    /^https:\/\/unogame-.*\.vercel\.app$/,               // All unogame preview deployments
+    /^https:\/\/.*-lucas-washingtons-projects\.vercel\.app$/, // All project deployments
+    "http://localhost:3000",                             // Local development
+    "http://localhost:5173",                             // Vite dev server
+    "http://localhost:3001",                             // Local backend
+    "https://uno-game-server-saq7.onrender.com"         // Render backend
   ],
   methods: ["GET", "POST"],
   credentials: true
@@ -26,17 +28,19 @@ const server = http.createServer(app);
 const io = new Server(server, {
   cors: {
     origin: [
-      "https://unogame-eta.vercel.app",        // Your ACTUAL Vercel frontend URL
-      "https://uno-woad.vercel.app",           // Keep the old one just in case
+      "https://unogame-eta.vercel.app",                  // Production
+      "https://unogame-git-main-lucas-washingtons-projects.vercel.app", // Git branch
+      /^https:\/\/unogame-.*\.vercel\.app$/,             // All unogame preview deployments
+      /^https:\/\/.*-lucas-washingtons-projects\.vercel\.app$/, // All project deployments
       "http://localhost:3000", 
-      "http://localhost:5173",                 // Vite dev server
+      "http://localhost:5173",                           // Vite dev server
       "http://localhost:3001",
-      "https://uno-game-server-saq7.onrender.com"  // Your Render backend
+      "https://uno-game-server-saq7.onrender.com"       // Render backend
     ],
     methods: ["GET", "POST"],
     credentials: true
   },
-  transports: ['websocket', 'polling'], // Try websocket first
+  transports: ['websocket', 'polling'],
   allowEIO3: true
 });
 
