@@ -9,7 +9,8 @@ const app = express();
 // Updated CORS configuration for Express
 app.use(cors({
   origin: [
-    "https://uno-woad.vercel.app",           // Your Vercel frontend
+    "https://unogame-eta.vercel.app",         // Your ACTUAL Vercel frontend URL
+    "https://uno-woad.vercel.app",           // Keep the old one just in case
     "http://localhost:3000",                 // Local development
     "http://localhost:5173",                 // Vite dev server
     "http://localhost:3001",                 // Local backend
@@ -25,7 +26,8 @@ const server = http.createServer(app);
 const io = new Server(server, {
   cors: {
     origin: [
-      "https://uno-woad.vercel.app",           // Your Vercel frontend
+      "https://unogame-eta.vercel.app",        // Your ACTUAL Vercel frontend URL
+      "https://uno-woad.vercel.app",           // Keep the old one just in case
       "http://localhost:3000", 
       "http://localhost:5173",                 // Vite dev server
       "http://localhost:3001",
