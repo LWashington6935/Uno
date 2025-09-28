@@ -11,8 +11,8 @@ const getApiUrl = () => {
   
   // Check for production environment
   if (import.meta.env.PROD) {
-    // Replace this with your actual Render backend URL
-    return 'https://your-uno-backend.onrender.com';
+    // Your actual Render backend URL
+    return 'https://uno-game-server-saq7.onrender.com';
   }
   
   // Development fallback
