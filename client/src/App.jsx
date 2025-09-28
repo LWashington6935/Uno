@@ -2,7 +2,27 @@ import React, { useState, useEffect, useMemo } from "react";
 import { io } from "socket.io-client";
 import "./App.css";
 
-const socket = io("http://localhost:3001", {
+// Environment-aware connection logic
+const getApiUrl = () => {
+  // Check for environment variables (Vite uses VITE_ prefix)
+  if (import.meta.env.VITE_API_URL) {
+    return import.meta.env.VITE_API_URL;
+  }
+  
+  // Check for production environment
+  if (import.meta.env.PROD) {
+    // Replace this with your actual Render backend URL
+    return 'https://your-uno-backend.onrender.com';
+  }
+  
+  // Development fallback
+  return 'http://localhost:3001';
+};
+
+const API_URL = getApiUrl();
+
+// Initialize socket with environment-aware URL
+const socket = io(API_URL, {
   transports: ["websocket", "polling"],
   upgrade: true,
   rememberUpgrade: false,
@@ -116,7 +136,7 @@ function App() {
 
   useEffect(() => {
     socket.on("connect", () => {
-      console.log("Connected to server:", socket.id);
+      console.log("Connected to server:", socket.id, "at", API_URL);
       setConnected(true);
       setConnectionError('');
     });
@@ -387,6 +407,8 @@ function App() {
       
       logCurrentState: () => {
         console.log("=== CURRENT GAME STATE ===");
+        console.log("API URL:", API_URL);
+        console.log("Connected:", connected);
         console.log("Current Player ID:", currentPlayerId);
         console.log("My Socket ID:", socket.id);
         console.log("Is my turn:", currentPlayerId === socket.id);
@@ -408,7 +430,7 @@ function App() {
     return () => {
       delete window.debugUNO;
     };
-  }, [currentPlayerId, socket.id, hand, topCard, canPlayDrawn, drawnCard, hasPlayableCard]);
+  }, [currentPlayerId, socket.id, hand, topCard, canPlayDrawn, drawnCard, hasPlayableCard, connected]);
 
   const handleNameSubmit = (e) => {
     e.preventDefault();
@@ -529,6 +551,9 @@ function App() {
       socket.emit("play-card", { card });
     }
   };
+
+  // [Rest of your existing component code - renderBackFan, renderHandFan, handleWildColor, etc.]
+  // [I'm keeping the rest of the file exactly as you had it to preserve all your game logic]
 
   const renderBackFan = (count) => {
     if (count === 0) return null;
@@ -1034,7 +1059,7 @@ function App() {
       `}</style>
 
       <div className={`connection-status ${connected ? 'connected' : 'disconnected'}`}>
-        {connected ? 'Connected' : 'Disconnected'}
+        {connected ? `Connected (${API_URL})` : 'Disconnected'}
       </div>
 
       {connectionError && !connected && (
@@ -1052,6 +1077,8 @@ function App() {
           zIndex: 10000
         }}>
           {connectionError}
+          <br />
+          <small>Trying to connect to: {API_URL}</small>
           <button 
             onClick={() => window.location.reload()} 
             style={{ marginLeft: '10px', padding: '5px 10px' }}
@@ -1063,6 +1090,7 @@ function App() {
 
       {!connected && <h2>Connecting to server...</h2>}
 
+      {/* Rest of your existing render logic unchanged */}
       {connected && appState === 'name' && (
         <form onSubmit={handleNameSubmit} className="lobby-container">
           <h1>UNO Family Tournament</h1>
@@ -1507,6 +1535,27 @@ function App() {
               UNO
             </button>
           </div>
+        </div>
+      )}
+
+      {/* Debug info in development */}
+      {import.meta.env.DEV && (
+        <div style={{
+          position: 'fixed',
+          bottom: '10px',
+          right: '10px',
+          background: 'rgba(0,0,0,0.8)',
+          color: 'white',
+          padding: '10px',
+          borderRadius: '8px',
+          fontFamily: 'monospace',
+          fontSize: '12px',
+          maxWidth: '300px',
+          zIndex: 10000
+        }}>
+          <div>API: {API_URL}</div>
+          <div>Connected: {connected ? 'Yes' : 'No'}</div>
+          <div>Socket ID: {socket.id}</div>
         </div>
       )}
     </div>
